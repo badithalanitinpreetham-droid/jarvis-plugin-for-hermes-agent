@@ -134,6 +134,7 @@ class HermesRegistry:
         self.discovery_ttl = max(0.0, float(discovery_ttl))
         self._snapshot: Dict[str, Any] = {"source": "filesystem", "root": "", "profiles": [], "bots": [], "profile_count": 0, "bot_count": 0, "active_profile_id": ""}
         self._last_discovery = 0.0
+        self._has_discovered = False
 
     def _root(self) -> Path:
         raw = str(self.requested_root or os.environ.get("HERMES_HOME", "") or (Path.home() / ".hermes"))
@@ -195,10 +196,13 @@ class HermesRegistry:
             "refreshed_at": time.time(),
         }
         self._last_discovery = time.monotonic()
+        self._has_discovered = True
         return self.snapshot()
 
     def discover(self, force_refresh: bool = False) -> Dict[str, Any]:
-        if force_refresh or (time.monotonic() - self._last_discovery) >= self.discovery_ttl:
+        # The very first call must always scan the filesystem. A positive TTL is a
+        # cache policy, not permission to return the constructor's empty placeholder.
+        if force_refresh or not self._has_discovered or (time.monotonic() - self._last_discovery) >= self.discovery_ttl:
             return self.refresh()
         return self.snapshot()
 

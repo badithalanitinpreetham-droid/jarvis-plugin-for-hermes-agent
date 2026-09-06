@@ -1,11 +1,7 @@
-"""General Hermes plugin facade for Jarvis intelligence and self-evolution.
-
-This plugin adds lightweight routing/context and outcome observation. Memory recall is
-owned by the native Jarvis MemoryProvider so Jarvis does not inject a second, competing
-memory pipeline into Hermes.
-"""
+"""Native Hermes plugin facade for Jarvis intelligence and owned local services."""
 from __future__ import annotations
 
+import atexit
 import json
 import threading
 from pathlib import Path
@@ -14,6 +10,7 @@ from typing import Any, Dict, Optional
 from .experience_store import ExperienceStore
 from .intelligence import JarvisIntelligence
 from .orchestration.registry import HermesRegistry
+from .tencent_runtime import TencentRuntime, get_tencent_runtime
 
 _MAX_HOOK_CONTEXT = 4500
 
@@ -26,6 +23,7 @@ class JarvisPluginRuntime:
         self._intelligence: Optional[JarvisIntelligence] = None
         self._home: Optional[Path] = None
         self._started = False
+        self._services: TencentRuntime = get_tencent_runtime()
 
     def start(self, hermes_home: Optional[str] = None) -> None:
         with self._lock:
@@ -35,6 +33,7 @@ class JarvisPluginRuntime:
             if self._started and self._home != requested:
                 self.close()
             self._home = requested
+            self._services.start(str(requested))
             self._registry = HermesRegistry(root=requested)
             self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
@@ -80,11 +79,8 @@ class JarvisPluginRuntime:
             stripped = result.lstrip().lower()
             failed = failed or stripped.startswith(("error:", "exception:", "traceback"))
         self._intelligence.observe_outcome(
-            goal=f"Hermes tool: {tool_name}",
-            status="failed" if failed else "success",
-            profile_id=profile_id,
-            session_id=session_id,
-            strategy="hermes_tool",
+            goal=f"Hermes tool: {tool_name}", status="failed" if failed else "success",
+            profile_id=profile_id, session_id=session_id, strategy="hermes_tool",
             evidence={"tool_name": tool_name, "result": result_text[:5000]},
         )
 
@@ -95,28 +91,30 @@ class JarvisPluginRuntime:
         result_text = str(result or "")
         failed = isinstance(result, dict) and bool(result.get("error"))
         self._intelligence.observe_outcome(
-            goal=task,
-            status="failed" if failed or not result_text.strip() else "success",
-            profile_id=profile_id,
-            session_id=session_id,
-            strategy="hermes_subagent",
+            goal=task, status="failed" if failed or not result_text.strip() else "success",
+            profile_id=profile_id, session_id=session_id, strategy="hermes_subagent",
             evidence={"result": result_text[:7000]},
         )
 
     def close(self) -> None:
         with self._lock:
-            if self._intelligence is not None:
-                self._intelligence.close()
-            elif self._store is not None:
-                self._store.close()
-            self._registry = None
-            self._store = None
-            self._intelligence = None
-            self._home = None
-            self._started = False
+            try:
+                if self._intelligence is not None:
+                    self._intelligence.close()
+                elif self._store is not None:
+                    self._store.close()
+            finally:
+                self._registry = None
+                self._store = None
+                self._intelligence = None
+                self._home = None
+                if self._services is not None:
+                    self._services.close()
+                self._started = False
 
 
 _RUNTIME = JarvisPluginRuntime()
+atexit.register(_RUNTIME.close)
 
 
 def _on_session_start(**kwargs: Any) -> None:
@@ -156,64 +154,68 @@ def _jarvis_record_outcome(arguments: Dict[str, Any], **kwargs: Any) -> str:
     if _RUNTIME._intelligence is None:
         return json.dumps({"error": "Jarvis intelligence unavailable"})
     outcome_id = _RUNTIME._intelligence.observe_outcome(
-        goal=str(arguments.get("goal") or ""),
-        status=str(arguments.get("status") or "success"),
-        profile_id=str(arguments.get("profile_id") or "default"),
-        session_id=str(arguments.get("session_id") or ""),
+        goal=str(arguments.get("goal") or ""), status=str(arguments.get("status") or "success"),
+        profile_id=str(arguments.get("profile_id") or "default"), session_id=str(arguments.get("session_id") or ""),
         strategy=str(arguments.get("strategy") or ""),
         bots=arguments.get("bots") if isinstance(arguments.get("bots"), list) else [],
-        deliverable=str(arguments.get("deliverable") or ""),
-        quality=arguments.get("quality"),
+        deliverable=str(arguments.get("deliverable") or ""), quality=arguments.get("quality"),
         evidence=arguments.get("evidence") if isinstance(arguments.get("evidence"), dict) else {},
         lessons=arguments.get("lessons") if isinstance(arguments.get("lessons"), list) else [],
     )
     return json.dumps({"recorded": True, "outcome_id": outcome_id})
 
 
+def _jarvis_runtime(arguments: Dict[str, Any], **kwargs: Any) -> str:
+    action = str(arguments.get("action") or "status").strip().lower()
+    if action == "start":
+        _RUNTIME.start(kwargs.get("hermes_home"))
+    elif action in {"stop", "shutdown"}:
+        _RUNTIME.close()
+    elif action != "status":
+        return json.dumps({"error": "action must be status, start, or stop"})
+    return json.dumps(_RUNTIME._services.status(), ensure_ascii=False)
+
+
 _ORCHESTRATE_SCHEMA = {
-    "type": "object",
-    "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}},
-    "required": ["goal"],
+    "type": "object", "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}}, "required": ["goal"],
+}
+_RUNTIME_SCHEMA = {
+    "type": "object", "properties": {"action": {"type": "string", "enum": ["status", "start", "stop"]}},
 }
 _RECORD_OUTCOME_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "goal": {"type": "string"},
-        "status": {"type": "string", "enum": ["success", "failed", "partial"]},
-        "profile_id": {"type": "string"},
-        "session_id": {"type": "string"},
-        "strategy": {"type": "string"},
-        "bots": {"type": "array", "items": {"type": "string"}},
-        "deliverable": {"type": "string"},
-        "quality": {"type": "number"},
-        "evidence": {"type": "object"},
-        "lessons": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": ["goal"],
+    "type": "object", "properties": {
+        "goal": {"type": "string"}, "status": {"type": "string", "enum": ["success", "failed", "partial"]},
+        "profile_id": {"type": "string"}, "session_id": {"type": "string"}, "strategy": {"type": "string"},
+        "bots": {"type": "array", "items": {"type": "string"}}, "deliverable": {"type": "string"},
+        "quality": {"type": "number"}, "evidence": {"type": "object"}, "lessons": {"type": "array", "items": {"type": "string"}},
+    }, "required": ["goal"],
 }
+
+
+def _handle_command(raw_args: str) -> Optional[str]:
+    action = raw_args.strip().lower() or "status"
+    return _jarvis_runtime({"action": action})
 
 
 def register(ctx: Any) -> None:
-    """Native Hermes plugin registration. No core Hermes files are modified."""
+    """Register Jarvis with Hermes and start Jarvis-owned local services."""
+    _RUNTIME.start()
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_hook("on_session_end", _on_session_end)
-    ctx.register_tool(
-        name="jarvis_orchestrate",
-        toolset="jarvis",
-        schema=_ORCHESTRATE_SCHEMA,
-        handler=_jarvis_orchestrate,
-        description="Analyse a goal and recommend how Hermes should organise its existing workforce.",
-    )
-    ctx.register_tool(
-        name="jarvis_record_outcome",
-        toolset="jarvis",
-        schema=_RECORD_OUTCOME_SCHEMA,
-        handler=_jarvis_record_outcome,
-        description="Record a completed work outcome so Jarvis can learn from it.",
-    )
+    ctx.register_tool(name="jarvis_orchestrate", toolset="jarvis", schema=_ORCHESTRATE_SCHEMA,
+                      handler=_jarvis_orchestrate,
+                      description="Analyse a goal and recommend how Hermes should organise its existing workforce.")
+    ctx.register_tool(name="jarvis_record_outcome", toolset="jarvis", schema=_RECORD_OUTCOME_SCHEMA,
+                      handler=_jarvis_record_outcome,
+                      description="Record a completed work outcome so Jarvis can learn from it.")
+    ctx.register_tool(name="jarvis_runtime", toolset="jarvis", schema=_RUNTIME_SCHEMA,
+                      handler=_jarvis_runtime,
+                      description="Start, stop, or inspect Jarvis-owned TencentDB and Ollama services.")
+    ctx.register_command("jarvis", handler=_handle_command,
+                         description="Manage Jarvis-owned TencentDB and Ollama services.", args_hint="<status|start|stop>")
 
 
 __all__ = ["JarvisPluginRuntime", "register"]

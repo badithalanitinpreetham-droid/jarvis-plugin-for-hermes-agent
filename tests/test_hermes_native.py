@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,6 +20,16 @@ class FakeContext:
 
 
 class TestHermesNativeIntegration(unittest.TestCase):
+    def setUp(self):
+        self._old_autostart = os.environ.get("JARVIS_TENCENT_AUTOSTART")
+        os.environ["JARVIS_TENCENT_AUTOSTART"] = "0"
+
+    def tearDown(self):
+        if self._old_autostart is None:
+            os.environ.pop("JARVIS_TENCENT_AUTOSTART", None)
+        else:
+            os.environ["JARVIS_TENCENT_AUTOSTART"] = self._old_autostart
+
     def test_plugin_registers_current_hermes_surfaces(self):
         ctx = FakeContext()
         register(ctx)
@@ -33,8 +44,7 @@ class TestHermesNativeIntegration(unittest.TestCase):
             runtime = JarvisPluginRuntime()
             result = runtime.pre_llm_context(
                 messages=[{"role": "user", "content": "Build and publish a weekly AI research report"}],
-                profile_id="default",
-                hermes_home=tmp,
+                profile_id="default", hermes_home=tmp,
             )
             self.assertTrue(result)
             self.assertLessEqual(len(result), 4500)
@@ -52,9 +62,7 @@ class TestHermesNativeIntegration(unittest.TestCase):
 
     def test_trivial_pre_llm_hook_is_silent(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = _on_pre_llm_call(
-                messages=[{"role": "user", "content": "thanks"}], hermes_home=tmp
-            )
+            result = _on_pre_llm_call(messages=[{"role": "user", "content": "thanks"}], hermes_home=tmp)
             self.assertIsNone(result)
 
 

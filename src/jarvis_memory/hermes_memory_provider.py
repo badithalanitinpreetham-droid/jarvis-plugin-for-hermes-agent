@@ -1,7 +1,7 @@
 """Native Hermes MemoryProvider backed by Jarvis + Tencent MemoryCore.
 
-Jarvis is intentionally the only component that knows about TencentDB/MemoryCore.
-Hermes sees a normal MemoryProvider named ``jarvis``.
+Jarvis owns TencentDB and the local Ollama lifecycle. Hermes sees one normal
+memory provider named ``jarvis``.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from .experience_store import ExperienceStore
 from .intelligence import JarvisIntelligence
 from .orchestration.registry import HermesRegistry
 from .tencent_memory import CircuitBreakerOpen, MemoryGatewayError, TencentMemoryClient
+from .tencent_runtime import get_tencent_runtime
 
 try:
     from agent.memory_provider import INDICATOR_GLYPH, MemoryProvider, RecallStatus
@@ -60,7 +61,7 @@ class JarvisMemoryProvider(MemoryProvider):
             return False
 
     def unavailable_reason(self) -> str:
-        return "Set TDAI_GATEWAY_URL and optional TDAI_GATEWAY_API_KEY/TDAI_API_KEY for MemoryCore."
+        return "Jarvis owns local TencentDB/Ollama startup; disable JARVIS_TENCENT_AUTOSTART only when using an external MemoryCore."
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         with self._lock:
@@ -72,8 +73,11 @@ class JarvisMemoryProvider(MemoryProvider):
             self._store = ExperienceStore(db_path)
             self._registry = HermesRegistry(root=hermes_home)
             self._intelligence = JarvisIntelligence(self._registry, self._store)
+            runtime = get_tencent_runtime()
+            runtime.start(str(hermes_home))
             try:
-                self._client = TencentMemoryClient()
+                base_url = os.environ.get("JARVIS_TENCENT_GATEWAY_URL", "http://127.0.0.1:8420")
+                self._client = TencentMemoryClient(base_url=base_url)
             except Exception:
                 self._client = None
 
@@ -198,10 +202,7 @@ class JarvisMemoryProvider(MemoryProvider):
             return
         try:
             safe_metadata = {str(k): redact_secrets(str(v))[:600] for k, v in (metadata or {}).items()}
-            payload = {
-                "action": str(action), "target": str(target),
-                "content": redact_secrets(str(content or ""))[:6000], "metadata": safe_metadata,
-            }
+            payload = {"action": str(action), "target": str(target), "content": redact_secrets(str(content or ""))[:6000], "metadata": safe_metadata}
             self._client.capture(
                 self._user_id, json.dumps(payload, ensure_ascii=False),
                 {"source": "hermes_memory_write", "session_id": self._session_id},
@@ -218,13 +219,19 @@ class JarvisMemoryProvider(MemoryProvider):
     def shutdown(self) -> None:
         with self._lock:
             if self._client is not None:
-                self._client.close()
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
                 self._client = None
             if self._store is not None:
                 self._store.close()
                 self._store = None
             self._registry = None
             self._intelligence = None
+            # Switching away from Jarvis as the active memory provider releases
+            # the services Jarvis owns (TencentDB + only-the-Ollama-we-started).
+            get_tencent_runtime().stop()
 
 
 def provider_factory() -> JarvisMemoryProvider:
