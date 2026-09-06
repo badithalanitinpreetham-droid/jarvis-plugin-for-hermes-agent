@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SHIM_PATH="$HOME/.local/bin/hermes"
+SHIM_PATH="$HOME/.hermes/bin/hermes"
 
 # Stop the native runtime and unload macOS launchd before removing the package.
 # This keeps a loaded watchdog from recreating services after uninstall.
@@ -15,8 +15,8 @@ fi
 python3 -m pip uninstall -y jarvis-memory || true
 
 # Remove only the Jarvis-installed command shim. Never replace or delete the
-# user's real Hermes executable. Keep the PATH block because removing it is a
-# separate shell-profile policy decision and may have pre-existed this plugin.
+# user's real Hermes executable. Keep the shell PATH block because removing it
+# is a separate shell-profile policy decision.
 if [[ -f "$SHIM_PATH" ]] && grep -Fq 'jarvis-hermes-shim' "$SHIM_PATH" 2>/dev/null; then
   rm -f "$SHIM_PATH"
 fi
