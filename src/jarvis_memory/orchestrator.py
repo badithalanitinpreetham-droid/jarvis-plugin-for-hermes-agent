@@ -1,13 +1,7 @@
-"""
-Jarvis Memory Orchestrator
+"""Zero-config local bootstrap for Ollama and MemoryCore."""
+from __future__ import annotations
 
-This is the "Zero-Config" bootstrapper for the Jarvis package.
-Before starting the MCP server, it silently ensures that the local AI
-infrastructure (Ollama) is running and the required models are downloaded.
-It then auto-wires the environment variables so the TencentDB Gateway
-uses the local Ollama instance for memory distillation.
-"""
-
+import atexit
 import logging
 import os
 import signal
@@ -15,162 +9,112 @@ import subprocess
 import sys
 import time
 import urllib.request
-import atexit
-from typing import List
-
-from .server import main as server_main
 
 logger = logging.getLogger(__name__)
 
-# The models to auto-pull for the zero-config setup
-EMBEDDING_MODEL = "kinfra-text-embedding-0.6b"
-# A lightweight generative model is also needed by the Gateway for memory summarization
-GENERATIVE_MODEL = "qwen3.5:0.5b"
+EMBEDDING_MODEL = os.environ.get("JARVIS_EMBEDDING_MODEL", "kinfra-text-embedding-0.6b")
+GENERATIVE_MODEL = os.environ.get("JARVIS_GENERATIVE_MODEL", "qwen3.5:0.5b")
+OLLAMA_API_URL = os.environ.get("OLLAMA_API_URL", "http://127.0.0.1:11434")
+MEMORYCORE_REF = os.environ.get("JARVIS_MEMORYCORE_REF", "2ee22397f6091b8cd3ea847bc1edb04d3bec0c94")
 
-OLLAMA_API_URL = "http://127.0.0.1:11434"
+_spawned_processes: list[subprocess.Popen] = []
 
-_spawned_processes = []
 
-def _cleanup_background_processes():
-    """Ensure we don't leave zombie processes (Ollama, Node) eating RAM when the plugin stops."""
-    for p in _spawned_processes:
+def _cleanup() -> None:
+    for proc in list(_spawned_processes):
         try:
-            if sys.platform != "win32":
-                os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-            else:
-                p.terminate()
+            if proc.poll() is None:
+                if sys.platform != "win32":
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                else:
+                    proc.terminate()
         except Exception:
-            try:
-                p.terminate()
-            except:
-                pass
+            logger.debug("Background process cleanup failed", exc_info=True)
 
-atexit.register(_cleanup_background_processes)
+atexit.register(_cleanup)
+
+
+def _run(cmd: list[str], *, cwd: str | None = None, check: bool = True, capture: bool = False):
+    return subprocess.run(cmd, cwd=cwd, check=check, text=True,
+                          capture_output=capture)
 
 
 def is_ollama_running() -> bool:
-    """Check if the local Ollama server is responding."""
     try:
-        req = urllib.request.Request(f"{OLLAMA_API_URL}/api/version")
-        with urllib.request.urlopen(req, timeout=2) as response:
+        with urllib.request.urlopen(f"{OLLAMA_API_URL}/api/version", timeout=2) as response:
             return response.status == 200
     except Exception:
         return False
 
 
-def start_ollama():
-    """Attempt to start the Ollama daemon in the background."""
-    logger.info("Ollama is not running. Attempting to start it in the background...")
+def start_ollama() -> None:
+    if is_ollama_running():
+        return
     try:
-        kwargs = {}
-        if sys.platform != "win32":
-            kwargs["start_new_session"] = True
-            
-        # On Mac/Linux, ollama serve runs the daemon
-        p = subprocess.Popen(
-            ["ollama", "serve"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **kwargs
-        )
-        _spawned_processes.append(p)
-        # Give it a few seconds to boot
-        for _ in range(5):
-            time.sleep(1)
-            if is_ollama_running():
-                logger.info("Successfully started Ollama.")
-                return
-        logger.warning("Tried to start Ollama but it is still not responding.")
-    except FileNotFoundError:
-        logger.error("Ollama executable not found. For a fully automatic setup, please install Ollama from https://ollama.com.")
-        sys.exit(1)
+        kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
+        proc = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+        _spawned_processes.append(proc)
+    except FileNotFoundError as exc:
+        raise RuntimeError("Ollama is not installed or not on PATH") from exc
+    for _ in range(15):
+        if is_ollama_running():
+            return
+        time.sleep(1)
+    raise RuntimeError("Ollama did not become ready within 15 seconds")
 
 
-def setup_and_start_gateway():
-    """Silently download, install, and start the TencentDB Gateway in the background."""
-    gateway_dir = os.path.expanduser("~/.jarvis-memory/tencent-gateway")
-    
-    # 1. Download if it doesn't exist
-    if not os.path.exists(gateway_dir):
-        logger.info("First run detected: Initializing Memory Database infrastructure... (This happens once)")
-        try:
-            subprocess.run(
-                ["git", "clone", "https://github.com/TencentCloud/TencentDB-Agent-Memory.git", gateway_dir],
-                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-            )
-            logger.info("Database infrastructure downloaded.")
-        except FileNotFoundError:
-            logger.error("'git' is required to auto-install the memory database.")
-            sys.exit(1)
+def _node_version_ok() -> bool:
+    try:
+        result = _run(["node", "--version"], capture=True)
+        raw = result.stdout.strip().lstrip("v")
+        major, minor, *_ = (int(x) for x in raw.split("."))
+        return (major, minor) >= (22, 16)
+    except Exception:
+        return False
 
-    # 2. Install dependencies if node_modules is missing
-    if not os.path.exists(os.path.join(gateway_dir, "node_modules")):
-        logger.info("Installing database dependencies...")
-        try:
-            subprocess.run(["npm", "install"], cwd=gateway_dir, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except FileNotFoundError:
-            logger.error("'npm' (Node.js) is required to run the memory database.")
-            sys.exit(1)
 
-    # 3. Export configuration for GatewaySupervisor to own and auto-restart it
+def _ensure_gateway(gateway_dir: str) -> None:
+    parent = os.path.dirname(gateway_dir)
+    os.makedirs(parent, exist_ok=True)
+    if not os.path.isdir(os.path.join(gateway_dir, ".git")):
+        _run(["git", "clone", "https://github.com/TencentCloud/TencentDB-Agent-Memory.git", gateway_dir])
+    _run(["git", "fetch", "--depth", "1", "origin", MEMORYCORE_REF], cwd=gateway_dir, check=False)
+    _run(["git", "checkout", "--detach", MEMORYCORE_REF], cwd=gateway_dir)
+    if not _node_version_ok():
+        raise RuntimeError("MemoryCore requires Node.js >= 22.16")
+    _run(["npm", "install"], cwd=gateway_dir)
+    # Build when the checked-out release exposes a build script.
+    scripts = _run(["npm", "run"], cwd=gateway_dir, capture=True, check=False).stdout
+    if "build" in scripts:
+        _run(["npm", "run", "build"], cwd=gateway_dir)
     os.environ["GATEWAY_START_CMD"] = "npm start"
     os.environ["GATEWAY_CWD"] = gateway_dir
 
 
-def pull_model(model_name: str):
-    """Tell Ollama to pull a model if it isn't already downloaded."""
-    logger.info(f"Checking for local model: {model_name}...")
-    try:
-        # Check if it exists
-        result = subprocess.run(["ollama", "list"], capture_output=True, text=True)
-        if model_name in result.stdout:
-            logger.info(f"Model {model_name} is already available.")
-            return
-
-        # Pull the model
-        logger.info(f"Downloading {model_name}... This may take a moment on the first run.")
-        subprocess.run(["ollama", "pull", model_name], check=True)
-        logger.info(f"Successfully downloaded {model_name}.")
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to pull model {model_name}: {e}")
-    except FileNotFoundError:
-        pass  # Handled in start_ollama
+def pull_model(name: str) -> None:
+    result = _run(["ollama", "list"], capture=True, check=False)
+    if name in result.stdout:
+        return
+    _run(["ollama", "pull", name])
 
 
-def configure_zero_config_env():
-    """Inject the environment variables so the Gateway uses the local models."""
-    logger.info("Auto-wiring environment variables for zero-config local AI...")
-    
-    # We tell the Gateway to point to our local Ollama instance
+def configure_zero_config_env() -> None:
     os.environ.setdefault("TDAI_LLM_BASE_URL", f"{OLLAMA_API_URL}/v1")
-    # Tell the Gateway which models to use
     os.environ.setdefault("TDAI_LLM_MODEL", GENERATIVE_MODEL)
     os.environ.setdefault("TDAI_EMBEDDING_MODEL", EMBEDDING_MODEL)
-    # The Gateway needs some key, Ollama ignores it but Gateway might check for it
     os.environ.setdefault("TDAI_LLM_API_KEY", "ollama-local")
+    os.environ.setdefault("TDAI_API_VERSION", "v3")
 
 
-def main():
-    """Bootstrapper entry point."""
-    # Set up basic logging for the orchestrator
+def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    
-    # 1. Ensure Ollama is running
-    if not is_ollama_running():
-        start_ollama()
-        
-    # 2. Ensure models are downloaded
+    start_ollama()
     pull_model(EMBEDDING_MODEL)
     pull_model(GENERATIVE_MODEL)
-    
-    # 3. Auto-configure the environment for the memory gateway
     configure_zero_config_env()
-    
-    # 4. Download and start the TencentDB Gateway automatically
-    setup_and_start_gateway()
-    
-    # 5. Start the MCP server (which connects to the Gateway)
-    logger.info("Local AI infrastructure verified. Starting Jarvis Memory Server...")
+    _ensure_gateway(os.path.expanduser("~/.jarvis-memory/tencent-gateway"))
+    # Lazy import is essential: server.py constructs CONFIG-dependent objects at import time.
+    from .server import main as server_main
     server_main()
 
 
