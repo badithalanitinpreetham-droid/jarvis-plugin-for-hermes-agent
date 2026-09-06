@@ -1,9 +1,0 @@
-beautifulsoup4
-lxml
-mcp>=1.0.0
-pydantic
-httpx
-psutil
-
-[dev]
-pytest
