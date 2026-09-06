@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-memory"
-version = "4.3.0"
-description = "MCP intelligence and experience layer for Hermes Agent with durable workflows and organisational memory."
+version = "5.0.0"
+description = "Native Hermes intelligence and organisational memory plugin with Tencent MemoryCore and self-evolution."
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [{ name = "Jarvis AI Team" }]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
@@ -31,6 +31,12 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.entry-points."hermes_agent.plugins"]
+jarvis = "jarvis_memory.hermes_plugin:register"
+
+[project.entry-points."hermes_agent.memory_providers"]
+jarvis = "jarvis_memory.hermes_memory_provider:provider_factory"
 
 [project.scripts]
 jarvis-server = "jarvis_memory.orchestrator:main"
