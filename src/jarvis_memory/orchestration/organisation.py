@@ -39,6 +39,7 @@ class OrganisationPlan:
         return {
             "mode": self.mode,
             "summary": self.summary,
+            "recommended_worker_count": len(self.assignments),
             "assignments": [item.as_dict() for item in self.assignments],
             "temporary_agent_reasons": list(self.temporary_agent_reasons),
             "kanban_policy": dict(self.kanban_policy),
@@ -46,7 +47,7 @@ class OrganisationPlan:
 
 
 class OrganisationPlanner:
-    """Deterministic organisation planner used before an optional LLM plan is built."""
+    """Deterministic organisation planner used before an optional LLM plan."""
 
     _ROLE_RULES = (
         (
@@ -87,7 +88,12 @@ class OrganisationPlanner:
         ),
     )
 
-    def design(self, goal: str, context: str = "", lessons: List[str] | None = None) -> OrganisationPlan:
+    def design(
+        self,
+        goal: str,
+        context: str = "",
+        lessons: List[str] | None = None,
+    ) -> OrganisationPlan:
         text = f"{goal}\n{context}".lower()
         lessons = lessons or []
         assignments: List[AgentAssignment] = []
@@ -114,7 +120,18 @@ class OrganisationPlanner:
         complex_markers = (
             len(goal) > 180,
             len(assignments) >= 3,
-            any(word in text for word in ("multiple", "parallel", "large-scale", "100", "thousand", "every day")),
+            any(
+                word in text
+                for word in (
+                    "multiple",
+                    "parallel",
+                    "large-scale",
+                    "high volume",
+                    "100",
+                    "thousand",
+                    "every day",
+                )
+            ),
             len(lessons) >= 4,
         )
         complex = sum(bool(item) for item in complex_markers) >= 2
@@ -122,27 +139,30 @@ class OrganisationPlanner:
         temporary_reasons: List[str] = []
         if complex:
             temporary_reasons.append(
-                "Use temporary subagents for parallel research, specialist gaps, or high-volume subtasks; prefer existing permanent Bots first."
+                "Use temporary subagents for parallel research, specialist gaps, or "
+                "high-volume subtasks; prefer existing permanent Bots first."
             )
         if len(assignments) >= 3:
             temporary_reasons.append(
-                "A temporary verifier or fact-checker may be added when independent validation reduces risk."
+                "A temporary verifier or fact-checker may be added when independent "
+                "validation reduces risk."
             )
 
         if len(assignments) > 1:
-            flow = "dependency_aware"
+            dependency_mode = "dependency_aware"
             parallelism = max(2, min(4, len(assignments)))
         else:
-            flow = "simple"
+            dependency_mode = "simple"
             parallelism = 1
 
         kanban_policy = {
             "use_hermes_kanban": len(assignments) > 1 or complex,
             "create_tasks_from_roles": True,
-            "dependency_mode": flow,
+            "dependency_mode": dependency_mode,
             "max_parallel_workers": parallelism,
             "review_gate_before_external_side_effects": True,
             "reuse_existing_bots_first": True,
+            "temporary_agents": "only_when_parallelism_specialist_gap_or_independent_verification_justifies",
         }
 
         mode = "multi_agent" if len(assignments) > 1 else "single_agent"
