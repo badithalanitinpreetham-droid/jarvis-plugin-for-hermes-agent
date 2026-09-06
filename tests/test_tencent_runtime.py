@@ -73,6 +73,20 @@ class TestTencentRuntime(unittest.TestCase):
                 runtime._start_ollama(home, DEFAULT_OLLAMA_MODEL, runtime._load_state(home))
             self.assertTrue(runtime._ollama_owned)
 
+    def test_recovery_refuses_to_claim_external_ollama(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".hermes"
+            state_dir = home / ".jarvis"
+            state_dir.mkdir(parents=True)
+            (state_dir / "runtime-state.json").write_text(
+                json.dumps({"version": 3, "enabled": True, "ollama_owned": False}),
+                encoding="utf-8",
+            )
+            runtime = TencentRuntime()
+            with patch.object(runtime, "_port_open", side_effect=lambda host, port: port == 8420):
+                with self.assertRaisesRegex(RuntimeError, "does not own it"):
+                    runtime.recover(str(home))
+
     def test_start_records_selected_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / ".hermes"
