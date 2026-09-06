@@ -1,4 +1,4 @@
-# 🧠 Jarvis for Hermes Agent (v5.0.0)
+# 🧠 Jarvis for Hermes Agent (v1.0)
 
 Jarvis is a **native Hermes Agent plugin**. Hermes remains the primary execution platform; Jarvis adds organisational intelligence, long-term experience, workforce routing, contextual memory, and guarded self-evolution.
 
@@ -47,6 +47,10 @@ skills/jarvis/SKILL.md
 ```
 
 The two skills are intentionally aligned: `hermes-skill/SKILL.md` is the Hermes operator/administrator guidance, while `skills/jarvis/SKILL.md` is the runtime integration guidance maintained with the plugin code.
+
+## Version 1.0
+
+Jarvis **1.0** is the first public product release identity for this native Hermes integration. The Python package uses semantic package version `1.0.0`, while the user-facing product and plugin identity is `1.0`.
 
 ## Install
 
