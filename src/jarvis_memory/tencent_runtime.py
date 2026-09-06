@@ -269,7 +269,7 @@ class TencentRuntime:
                 raise
 
     def recover(self, hermes_home: Optional[str] = None) -> bool:
-        """Recover enabled Jarvis-owned services without claiming external Ollama."""
+        """Recover enabled Jarvis-owned services without claiming external services."""
         with self._lock:
             home = self._home(hermes_home)
             state = self._load_state(home)
@@ -281,6 +281,9 @@ class TencentRuntime:
             self._root = home
             tencent_root_value = state.get("tencent_root")
             self._tencent_root = Path(str(tencent_root_value)).expanduser() if tencent_root_value else self._ensure_tencent_source(home)
+            missing_tencent = any(not self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096))
+            if missing_tencent and state.get("tencent_owned") is not True:
+                raise RuntimeError("TencentDB is partially unavailable, but Jarvis does not own that stack; refusing to start replacement services.")
             self._start_ollama(home, model, state)
             deploy = self._tencent_root / "deploy" / "global-images"
             self._env_file(self._tencent_root, model)
