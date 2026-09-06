@@ -35,7 +35,7 @@ class JarvisPluginRuntime:
             if self._started and self._home != requested:
                 self.close()
             self._home = requested
-            self._registry = HermesRegistry(hermes_home=requested)
+            self._registry = HermesRegistry(root=requested)
             self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
             self._started = True
