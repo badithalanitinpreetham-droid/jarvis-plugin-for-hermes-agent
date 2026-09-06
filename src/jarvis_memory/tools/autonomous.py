@@ -425,12 +425,19 @@ class AutonomousExecutor:
             "at": self._now_iso(),
         })
 
-        # Replace the plan and reset index to start from the new plan's first step
         state["plan"] = new_plan
-        state["next_index"] = 0
+        
+        # Calculate next_index based on first incomplete step
+        next_idx = 0
+        for i, s in enumerate(new_plan.get("steps", [])):
+            if s.get("id") not in state.get("completed_steps", []):
+                next_idx = i
+                break
+                
+        state["next_index"] = next_idx
         state["approved_index"] = None
         state["status"] = "running"
-        state["completed_steps"] = []
+        # We retain completed_steps to prevent amnesia (Defect 1)
         state["failed_steps"] = []
         state["archived_history"] = state.get("archived_history", []) + state.get("history", [])
         state["history"] = []

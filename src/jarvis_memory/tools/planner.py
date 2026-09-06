@@ -437,6 +437,7 @@ Output ONLY valid JSON in this format:
             failed_steps_group = steps[start_idx:end_idx + 1]
             remaining_steps = steps[end_idx + 1:]
         else:
+            start_idx = failed_idx
             failed_steps_group = [failed_step_data]
             remaining_steps = steps[failed_idx + 1:]
 
@@ -463,8 +464,13 @@ Output ONLY valid JSON in this format:
                 retry_step["race_group_id"] = fs["race_group_id"]
             retry_steps.append(retry_step)
 
-        # Preserve remaining steps with their original IDs
-        new_steps = retry_steps
+        # Preserve completed steps, retry steps, and remaining steps
+        new_steps = []
+        for step in steps[:start_idx]:
+            new_steps.append(dict(step))
+            
+        new_steps.extend(retry_steps)
+        
         for step in remaining_steps:
             preserved = dict(step)
             new_steps.append(preserved)
