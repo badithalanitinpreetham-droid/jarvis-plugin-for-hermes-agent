@@ -93,6 +93,11 @@ class OSAssistant:
                 subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
                 return "Toggled play/pause (Targeting Spotify/Music)"
                 
+            elif action == "diagnose_load":
+                # Return top CPU and RAM consuming processes
+                result = subprocess.run(["ps", "-A", "-o", "pid,%cpu,%mem,comm", "-r"], capture_output=True, text=True)
+                return "Top Processes:\n" + "\n".join(result.stdout.split("\n")[:20])
+                
             else:
                 return f"Unknown OS action: {action}"
                 

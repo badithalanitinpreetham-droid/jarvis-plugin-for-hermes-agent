@@ -311,6 +311,25 @@ async def list_tools() -> List[types.Tool]:
             }
         ),
         types.Tool(
+            name="jarvis_list_scheduled_goals",
+            description="View all recurring background workflows (crons) currently scheduled.",
+            inputSchema={
+                "type": "object",
+                "properties": {}
+            }
+        ),
+        types.Tool(
+            name="jarvis_unschedule_goal",
+            description="Delete a recurring scheduled background workflow by its trigger ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "trigger_id": {"type": "integer", "description": "The row ID of the scheduled trigger to delete."}
+                },
+                "required": ["trigger_id"]
+            }
+        ),
+        types.Tool(
             name="jarvis_mark_tool_broken",
             description="Manually flag a tool as broken. The planner will automatically force a 'Tool Repair' step the next time someone uses it.",
             inputSchema={
@@ -552,6 +571,15 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
                 interval_seconds=arguments["interval_seconds"]
             )
             result = {"status": "success", "message": f"Goal scheduled every {arguments['interval_seconds']} seconds."}
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+            
+        elif name == "jarvis_list_scheduled_goals":
+            triggers = _workflow_store.get_triggers()
+            return [types.TextContent(type="text", text=json.dumps(triggers, indent=2))]
+            
+        elif name == "jarvis_unschedule_goal":
+            _workflow_store.delete_trigger(arguments["trigger_id"])
+            result = {"status": "success", "message": f"Trigger {arguments['trigger_id']} deleted."}
             return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
         elif name == "jarvis_mark_tool_broken":
