@@ -197,9 +197,13 @@ class WorkflowProgressRenderer:
         for i, step in enumerate(steps):
             step_id = step.get("id", i + 1)
             action = step.get("action", f"Step {step_id}")
-            short_action = action.split()[0] if action else "Unknown"
-            if len(action.split()) > 1:
-                short_action += f" {action.split()[1]}"
+            parts = action.split()
+            if parts:
+                short_action = parts[0]
+                if len(parts) > 1:
+                    short_action += f" {parts[1]}"
+            else:
+                short_action = f"Step {step_id}"
                 
             label = f"Step {step_id}: {short_action[:15]}"
             
