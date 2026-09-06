@@ -112,8 +112,6 @@ class JarvisPluginRuntime:
                 self._store = None
                 self._intelligence = None
                 self._home = None
-                # On macOS, the launchd supervisor owns the persistent local runtime.
-                # Do not tear down services simply because the Hermes process exits.
                 launchd_loaded = False
                 if sys.platform == "darwin":
                     try:
@@ -205,11 +203,15 @@ _RECORD_OUTCOME_SCHEMA = {
 
 
 def _setup_jarvis_start(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", choices=["jarvis"], help="Start Jarvis and its owned local services")
+    # `register_cli_command()` is scoped by the plugin manifest name, so this
+    # produces the native command `hermes jarvis start`.
+    return None
 
 
 def _setup_jarvis_stop(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", choices=["jarvis"], help="Stop Jarvis and its owned local services")
+    # No positional `jarvis` argument belongs here; the plugin name already
+    # supplies that namespace.
+    return None
 
 
 def _handle_jarvis_start(args: argparse.Namespace) -> int:
@@ -273,14 +275,14 @@ def register(ctx: Any) -> None:
     if hasattr(ctx, "register_cli_command"):
         ctx.register_cli_command(
             name="start",
-            help="Start a Hermes extension",
+            help="Start Jarvis and its owned local services",
             setup_fn=_setup_jarvis_start,
             handler_fn=_handle_jarvis_start,
             description="Start the Jarvis plugin and its Jarvis-owned TencentDB/Ollama runtime.",
         )
         ctx.register_cli_command(
             name="stop",
-            help="Stop a Hermes extension",
+            help="Stop Jarvis and its owned local services",
             setup_fn=_setup_jarvis_stop,
             handler_fn=_handle_jarvis_stop,
             description="Stop the Jarvis plugin's owned TencentDB/Ollama runtime without stopping Hermes.",
