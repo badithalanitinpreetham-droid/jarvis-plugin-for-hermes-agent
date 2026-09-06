@@ -2,7 +2,7 @@
 
 Jarvis is a **drop-in Hermes Agent plugin**. Hermes remains the execution platform; Jarvis adds organisational intelligence, long-term experience, workforce routing, contextual memory and guarded self-evolution.
 
-Jarvis also owns the local TencentDB Agent Memory runtime used by its memory layer. When Jarvis starts, it starts the required local Ollama process (only when Jarvis itself started it) and TencentDB's `memory-core → memory-hub → proxy` stack. On clean Jarvis/Hermes shutdown, Jarvis stops that stack and the Ollama process it owns.
+Jarvis also owns the local TencentDB Agent Memory runtime used by its memory layer. Jarvis is controlled from the Hermes CLI and does not require a separate Jarvis application.
 
 ## Native Hermes integration
 
@@ -11,7 +11,7 @@ USER
   ↓
 HERMES APP / AIAgent
   ↓
-JARVIS PLUGIN  ← optional
+JARVIS PLUGIN
   ├── goal classification
   ├── workforce intelligence
   ├── organisational experience
@@ -62,6 +62,51 @@ cd jarvis-plugin-for-hermes-agent
 ./scripts/install-jarvis.sh
 ```
 
+## Start and stop Jarvis
+
+These are the primary lifecycle commands:
+
+```bash
+hermes start jarvis
+hermes stop jarvis
+```
+
+`hermes start jarvis` enables Jarvis and starts its required local runtime:
+
+```text
+Jarvis
+  ↓
+ensure pinned TencentDB source
+  ↓
+start Ollama only when 11434 is not already running
+  ↓
+start Tencent memory-core
+  ↓
+start Tencent memory-hub
+  ↓
+start Tencent proxy
+```
+
+`hermes stop jarvis` disables Jarvis and stops the TencentDB stack plus **only the Ollama process Jarvis started**. If Ollama was already running before Jarvis, it is left running.
+
+The lifecycle state is persisted under:
+
+```text
+~/.hermes/.jarvis/runtime-state.json
+```
+
+This is necessary because `hermes start jarvis` and `hermes stop jarvis` are separate CLI processes.
+
+## Automatic connection to Hermes
+
+After Jarvis is installed and enabled, a normal Hermes session automatically loads the Jarvis plugin through Hermes' native plugin system. During the Hermes session-start hook Jarvis starts its owned services and attaches its intelligence/memory layer to Hermes. You continue to use only Hermes; Jarvis operates as an internal extension.
+
+If Jarvis was explicitly stopped with `hermes stop jarvis`, the persisted disabled state prevents the next normal Hermes session from automatically restarting its local services until:
+
+```bash
+hermes start jarvis
+```
+
 ## TencentDB + Ollama ownership
 
 TencentDB Agent Memory is pinned as a repository submodule at:
@@ -76,25 +121,7 @@ Pinned Tencent revision:
 439f22ace03a08de828597b4eea2661f0978510c
 ```
 
-Jarvis provisions a persistent checkout under `~/.hermes/.jarvis/tencentdb/source` when needed, so the Tencent repository is cloned only once per Hermes home and reused on later Jarvis starts.
-
-When Jarvis activates with the default runtime settings:
-
-```text
-Jarvis start
-   ↓
-ensure Tencent source
-   ↓
-start Ollama if 11434 is not already running
-   ↓
-start Tencent memory-core
-   ↓
-start Tencent memory-hub
-   ↓
-start Tencent proxy
-   ↓
-Jarvis memory available at local MemoryCore
-```
+Jarvis provisions a persistent checkout under `~/.hermes/.jarvis/tencentdb/source` when needed, so the Tencent repository is cloned only once per Hermes home and reused on later starts.
 
 For the Tencent stack, Jarvis uses Ollama's OpenAI-compatible endpoint by default:
 
@@ -108,13 +135,13 @@ Set the local model with:
 export JARVIS_OLLAMA_MODEL=qwen3.5:4b
 ```
 
-The model is not silently downloaded. Install/pull the Ollama model once on your machine; Jarvis then owns the Ollama **server process lifecycle**. A pre-existing Ollama server is detected and is never killed by Jarvis.
+The model is not silently downloaded. Install/pull the Ollama model once on your machine; Jarvis then owns the Ollama **server process lifecycle**.
 
 The Tencent deployment itself remains Tencent's code; Jarvis invokes its supported `start-memory-core.sh`, `start-memory-hub.sh`, `start-proxy.sh`, and `stop-all.sh` scripts.
 
-## Runtime controls
+## In-Hermes controls
 
-Jarvis exposes both a Hermes tool and `/jarvis` command:
+Jarvis also exposes its existing in-session command and tool surfaces:
 
 ```text
 /jarvis status
@@ -122,28 +149,21 @@ Jarvis exposes both a Hermes tool and `/jarvis` command:
 /jarvis stop
 ```
 
-`jarvis_runtime` supports the same `status`, `start`, and `stop` actions.
+and the `jarvis_runtime` tool for Hermes' agent loop.
 
-Default automatic ownership can be disabled for external deployments with:
+## Runtime opt-out
+
+External deployments can disable automatic local service startup with:
 
 ```bash
 export JARVIS_TENCENT_AUTOSTART=0
 ```
 
-In that mode Jarvis does not start or stop the local Tencent/Ollama runtime.
+In that mode Jarvis does not automatically start or stop the local Tencent/Ollama runtime during normal Hermes lifecycle hooks. The explicit `hermes start jarvis` command remains the operator control for enabling the runtime.
 
 ## Plug out
 
-Switch away from Jarvis memory and disable the general plugin:
-
-```bash
-hermes config set memory.provider ""
-hermes plugins disable jarvis
-```
-
-The Jarvis memory provider's shutdown path releases the Tencent/Ollama runtime it owns. A normal Hermes process shutdown also triggers Jarvis cleanup through its exit handler.
-
-For complete removal:
+To remove Jarvis as a Hermes extension:
 
 ```bash
 hermes config set memory.provider ""
@@ -151,16 +171,7 @@ hermes plugins disable jarvis
 hermes plugins remove jarvis
 ```
 
-The persistent Jarvis experience database and Tencent data volumes are intentionally retained; removing the Python/package code does not erase historical memory.
-
-## Reconnect
-
-```bash
-hermes plugins enable jarvis
-hermes config set memory.provider jarvis
-```
-
-Jarvis reuses the persisted experience DB and Tencent data rather than starting the organisation's learning history from zero.
+Persistent Jarvis experience data and Tencent data volumes are intentionally retained; removing the Python/plugin code does not erase historical memory.
 
 ## Memory layers
 
@@ -172,7 +183,7 @@ Jarvis experience / organisation memory
 Tencent MemoryCore semantic memory
 ```
 
-TencentDB remains an internal Jarvis backend. Hermes users interact with the `jarvis` plugin/provider, not a separate Tencent extension.
+TencentDB remains an internal Jarvis backend. Hermes users interact with the Jarvis plugin/provider, not a separate Tencent extension.
 
 ## Safety
 
