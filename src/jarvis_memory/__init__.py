@@ -1,5 +1,5 @@
 """Jarvis for Hermes Agent: intelligence, memory, experience and self-evolution."""
-__version__ = "5.0.0"
+__version__ = "1.0.0"
 
 from .config import CONFIG
 from .core import JarvisEngine
