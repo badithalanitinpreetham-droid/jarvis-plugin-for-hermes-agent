@@ -8,9 +8,7 @@ import threading
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
-
 TERMINAL = {"completed", "completed_with_failures", "failed", "cancelled"}
-
 
 class WorkflowStore:
     def __init__(self, db_path: str):
@@ -31,15 +29,17 @@ class WorkflowStore:
     def _init_schema(self) -> None:
         with self._lock:
             self._conn.execute("""CREATE TABLE IF NOT EXISTS workflows(
-                workflow_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
-                status TEXT NOT NULL, state_json TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+                workflow_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL, status TEXT NOT NULL,
+                state_json TEXT NOT NULL, updated_at TEXT NOT NULL)""")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS dedupe_keys(
                 dedupe_key TEXT PRIMARY KEY, workflow_id TEXT NOT NULL,
                 step_id TEXT NOT NULL, completed_at TEXT NOT NULL)""")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS triggers(
                 goal TEXT NOT NULL, profile_id TEXT NOT NULL, interval_seconds INTEGER NOT NULL,
                 last_run TEXT, created_at TEXT NOT NULL)""")
-            self._conn.execute("DELETE FROM triggers WHERE interval_seconds <= 0")
+            # Migrate old databases safely: remove duplicate schedules before the unique index.
+            self._conn.execute("""DELETE FROM triggers WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM triggers GROUP BY goal, profile_id, interval_seconds)""")
             self._conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_unique
                 ON triggers(goal, profile_id, interval_seconds)""")
             self._conn.execute("""CREATE TABLE IF NOT EXISTS broken_tools(
@@ -49,9 +49,8 @@ class WorkflowStore:
     def save(self, workflow_id: str, state: Dict[str, Any]) -> None:
         with self._lock:
             self._conn.execute("""INSERT INTO workflows(workflow_id,profile_id,status,state_json,updated_at)
-                VALUES(?,?,?,?,?) ON CONFLICT(workflow_id) DO UPDATE SET
-                profile_id=excluded.profile_id,status=excluded.status,state_json=excluded.state_json,
-                updated_at=excluded.updated_at""",
+                VALUES(?,?,?,?,?) ON CONFLICT(workflow_id) DO UPDATE SET profile_id=excluded.profile_id,
+                status=excluded.status,state_json=excluded.state_json,updated_at=excluded.updated_at""",
                 (workflow_id, state["profile_id"], state["status"], json.dumps(state), self._now()))
             self._conn.commit()
 
@@ -63,7 +62,7 @@ class WorkflowStore:
     def load_all(self, include_terminal: bool = True) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute("SELECT workflow_id,state_json FROM workflows").fetchall()
-        result: Dict[str, Dict[str, Any]] = {}
+        result = {}
         for wid, raw in rows:
             try:
                 state = json.loads(raw)
@@ -87,10 +86,10 @@ class WorkflowStore:
                 if status not in TERMINAL:
                     continue
                 try:
-                    ts = datetime.fromisoformat(updated_at)
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                    if ts < cutoff:
+                    dt = datetime.fromisoformat(updated_at)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    if dt < cutoff:
                         doomed.append((wid,))
                 except ValueError:
                     continue
