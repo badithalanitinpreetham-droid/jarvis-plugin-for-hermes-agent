@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import time
 from typing import Any, Dict, Iterable, List, Mapping
+
+from .registry import HermesRegistry
 
 
 @dataclass(frozen=True)
 class AgentAssignment:
-    """A role Jarvis wants Hermes to staff for a goal."""
+    """A role Jarvis recommends Hermes staff for a goal."""
 
     role: str
     purpose: str
@@ -55,97 +58,90 @@ class OrganisationPlan:
 
 
 class OrganisationPlanner:
-    """Deterministic organisation planner used before an optional LLM plan.
+    """Deterministic first-pass organisation planner with live Hermes discovery.
 
-    Hermes owns the real Bot registry. Jarvis may receive a lightweight roster
-    snapshot and use it to select existing specialists without creating or
-    replacing agents itself.
+    Hermes owns the actual Bot/profile system. Jarvis only reads a small, safe
+    metadata projection and recommends staffing; it never creates or mutates Bots.
     """
 
     _ROLE_RULES = (
-        (
-            "researcher",
-            ("research", "investigate", "survey", "compare", "literature", "market"),
-            "Find and synthesise reliable source material.",
-            ["web_research", "source_analysis"],
-        ),
-        (
-            "writer",
-            ("write", "script", "article", "report", "documentation", "content"),
-            "Transform approved research into clear deliverables.",
-            ["writing", "editing"],
-        ),
-        (
-            "developer",
-            ("build", "develop", "code", "implement", "software", "app", "bug", "fix"),
-            "Design, implement and test the technical solution.",
-            ["coding", "testing"],
-        ),
-        (
-            "reviewer",
-            ("review", "verify", "validate", "audit", "quality", "check"),
-            "Independently inspect outputs against success criteria.",
-            ["verification", "quality_assurance"],
-        ),
-        (
-            "publisher",
-            ("publish", "youtube", "upload", "release", "post", "deploy"),
-            "Prepare and publish the final deliverable after approval.",
-            ["publishing", "release_management"],
-        ),
-        (
-            "analyst",
-            ("analyse", "analyze", "data", "metrics", "forecast", "evaluate"),
-            "Turn raw information into structured analysis and decisions.",
-            ["analysis", "data_processing"],
-        ),
+        ("researcher", ("research", "investigate", "survey", "compare", "literature", "market", "sources"),
+         "Find and synthesise reliable source material.", ("web_research", "source_analysis")),
+        ("writer", ("write", "script", "article", "report", "documentation", "content"),
+         "Transform approved research into a clear deliverable.", ("writing", "editing")),
+        ("developer", ("build", "develop", "code", "implement", "software", "app", "bug", "fix"),
+         "Design, implement and test the technical solution.", ("coding", "testing")),
+        ("reviewer", ("review", "verify", "validate", "audit", "quality", "check", "fact-check"),
+         "Independently inspect outputs against success criteria.", ("verification", "quality_assurance")),
+        ("publisher", ("publish", "youtube", "upload", "release", "post", "deploy"),
+         "Prepare and publish the final deliverable after approval.", ("publishing", "release_management")),
+        ("analyst", ("analyse", "analyze", "data", "metrics", "forecast", "evaluate"),
+         "Turn raw information into structured analysis and decisions.", ("analysis", "data_processing")),
     )
+
+    def __init__(self, registry: HermesRegistry | None = None, discovery_ttl: float = 5.0):
+        self.registry = registry or HermesRegistry()
+        self.discovery_ttl = max(0.0, float(discovery_ttl))
+        self._last_discovery = 0.0
+        self._cached_bots: List[Dict[str, Any]] = []
+
+    def _get_bots(self, available_bots: Iterable[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
+        if available_bots is not None:
+            return self._normalise_roster(available_bots)
+        now = time.monotonic()
+        if now - self._last_discovery >= self.discovery_ttl:
+            try:
+                self._cached_bots = self._normalise_roster(self.registry.discover().get("bots", []))
+            except Exception:
+                self._cached_bots = []
+            self._last_discovery = now
+        return [dict(item) for item in self._cached_bots]
 
     @staticmethod
     def _normalise_roster(available_bots: Iterable[Mapping[str, Any]] | None) -> List[Dict[str, Any]]:
         roster: List[Dict[str, Any]] = []
+        seen: set[str] = set()
         for raw in available_bots or []:
             if not isinstance(raw, Mapping):
                 continue
-            name = str(raw.get("id") or raw.get("name") or raw.get("profile_id") or "").strip()
-            if not name:
+            bot_id = str(raw.get("id") or raw.get("name") or raw.get("profile_id") or "").strip()
+            if not bot_id or bot_id in seen:
                 continue
+            seen.add(bot_id)
             capabilities = raw.get("capabilities", raw.get("skills", []))
             if isinstance(capabilities, str):
                 capabilities = [capabilities]
             if not isinstance(capabilities, Iterable):
                 capabilities = []
-            roster.append(
-                {
-                    "id": name,
-                    "role": str(raw.get("role") or "").strip().lower(),
-                    "capabilities": {str(item).strip().lower() for item in capabilities if str(item).strip()},
-                    "description": str(raw.get("description") or raw.get("purpose") or "").strip().lower(),
-                }
-            )
+            roster.append({
+                "id": bot_id,
+                "role": str(raw.get("role") or "").strip().lower(),
+                "capabilities": {str(item).strip().lower() for item in capabilities if str(item).strip()},
+                "description": str(raw.get("description") or raw.get("purpose") or "").strip().lower(),
+                "available": bool(raw.get("available", True)),
+            })
         return roster
 
     @staticmethod
-    def _select_bot(role: str, capabilities: List[str], roster: List[Dict[str, Any]], used: set[str]) -> tuple[str | None, str]:
+    def _select_bot(role: str, capabilities: Iterable[str], roster: List[Dict[str, Any]], used: set[str]) -> tuple[str | None, str]:
+        required = {role.lower(), *(item.lower() for item in capabilities)}
         best_id: str | None = None
         best_score = 0
-        required = {role.lower(), *(item.lower() for item in capabilities)}
         for bot in roster:
             bot_id = bot["id"]
-            if bot_id in used:
+            if bot_id in used or not bot.get("available", True):
                 continue
             score = 0
-            if bot["role"] == role.lower():
-                score += 5
-            score += len(required & bot["capabilities"]) * 2
-            if role.lower() in bot["description"]:
-                score += 2
+            if bot.get("role") == role.lower():
+                score += 8
+            score += 3 * len(required & bot.get("capabilities", set()))
+            description = bot.get("description", "")
+            score += 2 * sum(1 for term in required if term in description)
             if score > best_score:
-                best_score = score
-                best_id = bot_id
+                best_id, best_score = bot_id, score
         if best_id:
             return best_id, "Existing Hermes Bot matched by role/capability overlap."
-        return None, "No unused permanent Hermes Bot matched strongly enough; Hermes may use a temporary worker."
+        return None, "No suitable permanent Hermes Bot is currently known for this role."
 
     def design(
         self,
@@ -154,9 +150,13 @@ class OrganisationPlanner:
         lessons: List[str] | None = None,
         available_bots: Iterable[Mapping[str, Any]] | None = None,
     ) -> OrganisationPlan:
+        goal = str(goal or "").strip()
+        context = str(context or "").strip()
+        if not goal:
+            raise ValueError("goal is required")
         text = f"{goal}\n{context}".lower()
-        lessons = lessons or []
-        roster = self._normalise_roster(available_bots)
+        lessons = list(lessons or [])
+        roster = self._get_bots(available_bots)
         used_bots: set[str] = set()
         assignments: List[AgentAssignment] = []
 
@@ -165,99 +165,64 @@ class OrganisationPlanner:
                 selected_bot, reason = self._select_bot(role, capabilities, roster, used_bots)
                 if selected_bot:
                     used_bots.add(selected_bot)
-                assignments.append(
-                    AgentAssignment(
-                        role=role,
-                        purpose=purpose,
-                        capabilities=list(capabilities),
-                        selected_bot=selected_bot,
-                        selected_bot_reason=reason,
-                    )
-                )
-
-        if not assignments:
-            selected_bot, reason = self._select_bot("generalist", ["planning", "execution", "verification"], roster, used_bots)
-            if selected_bot:
-                used_bots.add(selected_bot)
-            assignments.append(
-                AgentAssignment(
-                    role="generalist",
-                    purpose="Own the goal end-to-end using the best available Hermes capabilities.",
-                    capabilities=["planning", "execution", "verification"],
+                assignments.append(AgentAssignment(
+                    role=role,
+                    purpose=purpose,
+                    capabilities=list(capabilities),
                     selected_bot=selected_bot,
                     selected_bot_reason=reason,
-                )
-            )
+                ))
+
+        if not assignments:
+            selected_bot, reason = self._select_bot("generalist", ("planning", "execution", "verification"), roster, used_bots)
+            if selected_bot:
+                used_bots.add(selected_bot)
+            assignments.append(AgentAssignment(
+                role="generalist",
+                purpose="Own the goal end-to-end using the best available Hermes capabilities.",
+                capabilities=["planning", "execution", "verification"],
+                selected_bot=selected_bot,
+                selected_bot_reason=reason,
+            ))
 
         unfilled_roles = [item.role for item in assignments if not item.selected_bot]
-
-        complex_markers = (
+        complexity_score = sum((
             len(goal) > 180,
             len(assignments) >= 3,
-            any(
-                word in text
-                for word in (
-                    "multiple",
-                    "parallel",
-                    "large-scale",
-                    "high volume",
-                    "100",
-                    "thousand",
-                    "every day",
-                )
-            ),
+            any(term in text for term in ("multiple", "parallel", "large-scale", "high volume", "every day")),
             len(lessons) >= 4,
             bool(unfilled_roles) and len(assignments) > 1,
-        )
-        complex = sum(bool(item) for item in complex_markers) >= 2
+        ))
+        complex = complexity_score >= 2
 
         temporary_reasons: List[str] = []
         if unfilled_roles:
             temporary_reasons.append(
-                "No suitable permanent Hermes Bot was supplied for: "
-                + ", ".join(unfilled_roles)
-                + ". Hermes can use a temporary specialist if the role is genuinely needed."
+                "Permanent Hermes coverage is missing for: " + ", ".join(unfilled_roles) + ". "
+                "Use a temporary specialist only if the role is necessary."
             )
         if complex:
             temporary_reasons.append(
-                "Use temporary subagents for parallel research, specialist gaps, or "
-                "high-volume subtasks; prefer existing permanent Bots first."
-            )
-        if len(assignments) >= 3:
-            temporary_reasons.append(
-                "A temporary verifier or fact-checker may be added when independent "
-                "validation reduces risk."
+                "Temporary workers are justified only for parallelism, genuine specialist gaps, "
+                "or independent verification; existing permanent Bots remain preferred."
             )
 
-        if len(assignments) > 1:
-            dependency_mode = "dependency_aware"
-            parallelism = max(2, min(4, len(assignments)))
-        else:
-            dependency_mode = "simple"
-            parallelism = 1
-
-        kanban_policy = {
-            "use_hermes_kanban": len(assignments) > 1 or complex,
-            "create_tasks_from_roles": True,
-            "dependency_mode": dependency_mode,
-            "max_parallel_workers": parallelism,
-            "review_gate_before_external_side_effects": True,
-            "reuse_existing_bots_first": True,
-            "temporary_agents": "only_when_parallelism_specialist_gap_or_independent_verification_justifies",
-        }
-
-        mode = "multi_agent" if len(assignments) > 1 else "single_agent"
-        summary = (
-            f"Staff {len(assignments)} role(s) using existing Hermes Bots first; "
-            "create temporary workers only when parallelism, specialist coverage, "
-            "or independent verification justifies them."
-        )
+        multi = len(assignments) > 1
         return OrganisationPlan(
-            mode=mode,
-            summary=summary,
+            mode="multi_agent" if multi else "single_agent",
+            summary=(f"Use {len(assignments)} role(s), preferring existing Hermes Bots. "
+                     "Hermes owns any temporary-worker creation and Kanban execution."),
             assignments=assignments,
             temporary_agent_reasons=temporary_reasons,
-            kanban_policy=kanban_policy,
+            kanban_policy={
+                "use_hermes_kanban": multi or complex,
+                "create_tasks_from_roles": multi or complex,
+                "dependency_mode": "dependency_aware" if multi else "simple",
+                "max_parallel_workers": max(1, min(4, len(assignments))) if multi else 1,
+                "review_gate_before_external_side_effects": True,
+                "reuse_existing_bots_first": True,
+                "temporary_agents": "only_when_justified",
+            },
             available_bot_count=len(roster),
             unfilled_roles=unfilled_roles,
         )
