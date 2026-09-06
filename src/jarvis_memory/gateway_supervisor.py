@@ -182,7 +182,7 @@ class GatewaySupervisor:
                                 local_planner = WorkflowPlanner(memory_engine=self.memory, store=self.autonomous_executor.store)
                                 plan = local_planner.create_plan(t["goal"], t["profile_id"])
                                 wf_id = f"cron-{uuid.uuid4().hex[:8]}"
-                                self.autonomous_executor.start_workflow(t["goal"], plan, t["profile_id"], wf_id)
+                                self.autonomous_executor.start_workflow(workflow_id=wf_id, plan=plan, profile_id=t["profile_id"])
                                 logger.info(f"Proactive workflow {wf_id} successfully queued.")
                                 
                                 # Voice Alert
@@ -224,7 +224,7 @@ class GatewaySupervisor:
                         
                         import uuid
                         wf_id = f"auto-recovery-{uuid.uuid4().hex[:8]}"
-                        self.autonomous_executor.start_workflow(goal, plan, "system_admin_bot", wf_id)
+                        self.autonomous_executor.start_workflow(workflow_id=wf_id, plan=plan, profile_id="system_admin_bot")
                         
                         # Voice Alert
                         try:

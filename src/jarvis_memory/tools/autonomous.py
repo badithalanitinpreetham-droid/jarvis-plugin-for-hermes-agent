@@ -168,17 +168,30 @@ class AutonomousExecutor:
                     break
             
             if race_steps:
+                needs_approval = any(self._requires_approval(s) for s in race_steps)
+                if needs_approval and state["approved_index"] != idx:
+                    state["status"] = "awaiting_approval"
+                    self._persist(workflow_id)
+                    return {
+                        "workflow_id": workflow_id,
+                        "status": "awaiting_approval",
+                        "race_group_id": race_group,
+                        "parallel_steps": race_steps,
+                        "message": "One or more parallel steps require approval.",
+                        "requires_approval": True,
+                    }
+
                 if state["status"] == "running":
                     state["step_started_at"] = self._now_iso()
                     self._persist(workflow_id)
                 
                 return {
                     "workflow_id": workflow_id,
-                    "status": state["status"],
+                    "status": "ready_to_execute" if state["status"] == "running" else state["status"],
                     "race_group_id": race_group,
                     "parallel_steps": race_steps,
                     "message": "Execute these steps simultaneously. The first successful result will automatically cancel the others.",
-                    "requires_approval": any(self._requires_approval(s) for s in race_steps),
+                    "requires_approval": False,
                 }
 
         # Normal sequential return
@@ -214,7 +227,21 @@ class AutonomousExecutor:
         steps = state["plan"]["steps"]
         idx = state["next_index"]
 
-        if idx >= len(steps) or steps[idx].get("id") != step_id:
+        if idx >= len(steps):
+            return {"error": "No pending steps to approve"}
+            
+        current_step = steps[idx]
+        valid_ids = [current_step.get("id")]
+        
+        race_group = current_step.get("race_group_id")
+        if race_group:
+            for s in steps[idx+1:]:
+                if s.get("race_group_id") == race_group:
+                    valid_ids.append(s.get("id"))
+                else:
+                    break
+                    
+        if step_id not in valid_ids:
             return {"error": f"Step {step_id} is not the currently pending step"}
 
         state["approved_index"] = idx
@@ -387,6 +414,8 @@ class AutonomousExecutor:
         state["next_index"] = 0
         state["approved_index"] = None
         state["status"] = "running"
+        state["completed_steps"] = []
+        state["failed_steps"] = []
         self._persist(workflow_id)
 
         logger.info("Replan successful — new plan has %d steps", len(new_plan["steps"]))
@@ -454,6 +483,8 @@ class AutonomousExecutor:
 
         # Check both in-memory cache and store
         all_workflows = dict(self.active_workflows)
+        if self.store:
+            all_workflows.update(self.store.load_all())
         for wf_id, state in all_workflows.items():
             if state.get("status") not in ("running",):
                 continue
