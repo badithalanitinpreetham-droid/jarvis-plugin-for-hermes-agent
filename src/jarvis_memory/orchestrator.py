@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import atexit
+import json
 import logging
 import os
 import signal
@@ -31,12 +32,18 @@ def _cleanup() -> None:
         except Exception:
             logger.debug("Background process cleanup failed", exc_info=True)
 
+
 atexit.register(_cleanup)
 
 
 def _run(cmd: list[str], *, cwd: str | None = None, check: bool = True, capture: bool = False):
-    return subprocess.run(cmd, cwd=cwd, check=check, text=True,
-                          capture_output=capture)
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        check=check,
+        text=True,
+        capture_output=capture,
+    )
 
 
 def is_ollama_running() -> bool:
@@ -52,7 +59,12 @@ def start_ollama() -> None:
         return
     try:
         kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
-        proc = subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kwargs)
+        proc = subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **kwargs,
+        )
         _spawned_processes.append(proc)
     except FileNotFoundError as exc:
         raise RuntimeError("Ollama is not installed or not on PATH") from exc
@@ -78,24 +90,59 @@ def _ensure_gateway(gateway_dir: str) -> None:
     os.makedirs(parent, exist_ok=True)
     if not os.path.isdir(os.path.join(gateway_dir, ".git")):
         _run(["git", "clone", "https://github.com/TencentCloud/TencentDB-Agent-Memory.git", gateway_dir])
-    _run(["git", "fetch", "--depth", "1", "origin", MEMORYCORE_REF], cwd=gateway_dir, check=False)
-    _run(["git", "checkout", "--detach", MEMORYCORE_REF], cwd=gateway_dir)
+    fetch = _run(
+        ["git", "fetch", "--depth", "1", "origin", MEMORYCORE_REF],
+        cwd=gateway_dir,
+        check=False,
+        capture=True,
+    )
+    if fetch.returncode != 0:
+        raise RuntimeError(f"Unable to fetch MemoryCore ref {MEMORYCORE_REF}: {fetch.stderr.strip()[:500]}")
+    checkout = _run(
+        ["git", "checkout", "--detach", MEMORYCORE_REF],
+        cwd=gateway_dir,
+        check=False,
+        capture=True,
+    )
+    if checkout.returncode != 0:
+        raise RuntimeError(f"Unable to checkout MemoryCore ref {MEMORYCORE_REF}: {checkout.stderr.strip()[:500]}")
     if not _node_version_ok():
         raise RuntimeError("MemoryCore requires Node.js >= 22.16")
-    _run(["npm", "install"], cwd=gateway_dir)
-    # Build when the checked-out release exposes a build script.
-    scripts = _run(["npm", "run"], cwd=gateway_dir, capture=True, check=False).stdout
-    if "build" in scripts:
+
+    package_json = os.path.join(gateway_dir, "package.json")
+    package_lock = os.path.join(gateway_dir, "package-lock.json")
+    node_modules = os.path.join(gateway_dir, "node_modules")
+    if not os.path.isdir(node_modules):
+        _run(["npm", "ci" if os.path.isfile(package_lock) else "install"], cwd=gateway_dir)
+
+    build_script = False
+    try:
+        with open(package_json, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        build_script = isinstance(data, dict) and isinstance(data.get("scripts"), dict) and "build" in data["scripts"]
+    except (OSError, json.JSONDecodeError):
+        build_script = False
+    if build_script and not os.path.isdir(os.path.join(gateway_dir, "dist")):
         _run(["npm", "run", "build"], cwd=gateway_dir)
+
     os.environ["GATEWAY_START_CMD"] = "npm start"
     os.environ["GATEWAY_CWD"] = gateway_dir
 
 
 def pull_model(name: str) -> None:
-    result = _run(["ollama", "list"], capture=True, check=False)
-    if name in result.stdout:
+    wanted = str(name).strip()
+    if not wanted:
         return
-    _run(["ollama", "pull", name])
+    result = _run(["ollama", "list"], capture=True, check=False)
+    if result.returncode == 0:
+        installed = set()
+        for line in result.stdout.splitlines()[1:]:
+            fields = line.split()
+            if fields:
+                installed.add(fields[0])
+        if wanted in installed:
+            return
+    _run(["ollama", "pull", wanted])
 
 
 def configure_zero_config_env() -> None:
@@ -113,7 +160,6 @@ def main() -> None:
     pull_model(GENERATIVE_MODEL)
     configure_zero_config_env()
     _ensure_gateway(os.path.expanduser("~/.jarvis-memory/tencent-gateway"))
-    # Lazy import is essential: server.py constructs CONFIG-dependent objects at import time.
     from .server import main as server_main
     server_main()
 
