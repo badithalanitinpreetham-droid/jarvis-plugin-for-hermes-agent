@@ -1,36 +1,9 @@
-"""
-Client for TencentDB Agent Memory's MemoryCore Gateway.
-
-Replaces the old mem0 + Qdrant + local-Ollama stack entirely:
-- MemoryCore runs as its own long-lived service (its Quick Start docs show
-  it listening on 127.0.0.1:8420 by default, backed by SQLite + local
-  files) and does its own conversation -> memory distillation (L0 raw
-  turns -> L1 atomic facts -> L2 scenes -> L3 personas) using whatever LLM
-  *it* is configured with (TDAI_LLM_API_KEY / TDAI_LLM_BASE_URL /
-  TDAI_LLM_MODEL on the Gateway side, not this process).
-- That means jarvis-memory no longer needs to run its own critic-loop LLM
-  call to extract facts from a transcript — see analyze_and_learn() in
-  core.py, which now just forwards the transcript and lets the Gateway's
-  own pipeline do the extraction.
-
-IMPORTANT — VERIFY BEFORE PRODUCTION USE:
-The public docs for this project describe the endpoints referenced below
-(/capture, /recall, /session/end, /health) and the auth/isolation model
-(Bearer token, per-tenant isolation, circuit breaker after repeated
-failures) but the full request/response JSON schema was not fully
-documented in what I could pull. The shapes below (`user_id` as the
-tenant/profile key, `metadata` passed through on capture) are a
-reasonable mapping onto jarvis-memory's existing profile_id concept, but
-confirm field names against MemoryCore's actual OpenAPI/gateway docs
-before relying on this in a live pipeline — a mismatched field name will
-fail loudly (see CircuitBreakerOpen / non-2xx handling below) rather than
-silently, but better to catch it once at setup than mid-run.
-"""
+"""Thread-safe HTTP client for Tencent MemoryCore v3."""
+from __future__ import annotations
 
 import logging
-import os
-import time
 import threading
+import time
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -39,155 +12,131 @@ from .config import CONFIG
 
 logger = logging.getLogger(__name__)
 
-
 class MemoryGatewayError(Exception):
-    """Raised for any non-2xx response from the MemoryCore Gateway."""
-
+    pass
 
 class CircuitBreakerOpen(Exception):
-    """Raised when the circuit breaker is tripped — Gateway calls are paused."""
-
+    pass
 
 class TencentMemoryClient:
-    """
-    Thin HTTP client for the MemoryCore Gateway's v2 REST API.
-
-    Mirrors the resilience behavior the project's own v2 Hermes plugin
-    documents for itself: Bearer token auth, per-tenant isolation via
-    `user_id`, and a circuit breaker that opens after 5 consecutive
-    failures and cools down for 60s before allowing another attempt.
-    """
-
     FAILURE_THRESHOLD = CONFIG.circuit_failure_threshold
     COOLDOWN_SECONDS = CONFIG.circuit_cooldown_seconds
 
-    def __init__(
-        self,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        timeout: float = 30.0,
-    ):
+    def __init__(self, base_url: Optional[str] = None, api_key: Optional[str] = None, timeout: float = 30.0):
         self.base_url = (base_url or CONFIG.gateway_url).rstrip("/")
-        self.api_key = api_key or CONFIG.gateway_api_key or None
+        self.api_key = (api_key if api_key is not None else CONFIG.gateway_api_key).strip() or None
+        self.service_id = CONFIG.gateway_service_id
+        self.team_id = CONFIG.gateway_team_id
+        self.agent_id = CONFIG.gateway_agent_id
+        self.api_version = CONFIG.gateway_api_version.lower()
         self._client = httpx.Client(timeout=timeout)
         self._consecutive_failures = 0
         self._circuit_lock = threading.Lock()
         self._circuit_opened_at: Optional[float] = None
 
-    def _headers(self) -> Dict[str, str]:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+    def _headers(self, content_type: bool = True) -> Dict[str, str]:
+        h = {"Authorization": f"Bearer {self.api_key or 'local'}"}
+        if content_type:
+            h["Content-Type"] = "application/json"
+        if self.service_id:
+            h["x-tdai-service-id"] = self.service_id
+        return h
 
-    def _check_circuit(self):
+    def _check_circuit(self) -> None:
         with self._circuit_lock:
             if self._circuit_opened_at is None:
                 return
             elapsed = time.monotonic() - self._circuit_opened_at
             if elapsed < self.COOLDOWN_SECONDS:
-                raise CircuitBreakerOpen(
-                    f"Circuit open — {self.COOLDOWN_SECONDS - elapsed:.0f}s remaining in cooldown"
-                )
-            # Cooldown elapsed: allow a trial request through (half-open).
-            # We do NOT reset _consecutive_failures yet — if this trial fails,
-            # _record_failure will immediately trip the circuit open again.
+                raise CircuitBreakerOpen(f"Circuit open — {self.COOLDOWN_SECONDS - elapsed:.0f}s remaining")
             self._circuit_opened_at = None
 
-    def _record_success(self):
+    def _record_success(self) -> None:
         with self._circuit_lock:
             self._consecutive_failures = 0
-            self._circuit_lock = threading.Lock()
             self._circuit_opened_at = None
 
-    def _record_failure(self):
+    def _record_failure(self) -> None:
         with self._circuit_lock:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self.FAILURE_THRESHOLD:
                 self._circuit_opened_at = time.monotonic()
-                logger.error("Circuit breaker OPEN after %d consecutive Gateway failures", self._consecutive_failures)
+                logger.error("MemoryCore circuit opened after %d failures", self._consecutive_failures)
 
-    def _request(self, method: str, path: str, json_body: Optional[Dict] = None) -> Dict[str, Any]:
+    def _request(self, method: str, path: str, body: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None) -> Any:
         self._check_circuit()
-        url = f"{self.base_url}{path}"
         try:
-            resp = self._client.request(method, url, headers=self._headers(), json=json_body)
-            if resp.status_code >= 400:
+            response = self._client.request(method, f"{self.base_url}{path}", headers=self._headers(), json=body, timeout=timeout)
+            if response.status_code >= 400:
                 self._record_failure()
-                raise MemoryGatewayError(f"{method} {path} -> {resp.status_code}: {resp.text[:500]}")
+                raise MemoryGatewayError(f"{method} {path} -> HTTP {response.status_code}: {response.text[:500]}")
+            try:
+                result = response.json() if response.content else {}
+            except ValueError:
+                result = {"raw_text": response.text}
+            if isinstance(result, dict) and result.get("code") not in (None, 0, "0"):
+                self._record_failure()
+                raise MemoryGatewayError(f"{method} {path} -> code={result.get('code')}: {result.get('message', 'unknown')}")
             self._record_success()
-            if resp.content:
-                try:
-                    return resp.json()
-                except Exception:
-                    return {"raw_text": resp.text}
-            return {}
-        except httpx.HTTPError as e:
+            return result
+        except CircuitBreakerOpen:
+            raise
+        except httpx.HTTPError as exc:
             self._record_failure()
-            raise MemoryGatewayError(f"{method} {path} failed: {e}") from e
+            raise MemoryGatewayError(f"{method} {path} failed: {exc}") from exc
+
+    def _identity(self, user_id: str) -> Dict[str, str]:
+        return {"team_id": self.team_id, "agent_id": self.agent_id, "user_id": str(user_id)}
 
     def health(self) -> bool:
         try:
-            resp = self._client.get(f"{self.base_url}/health", headers=self._headers(), timeout=2.0)
-            if resp.status_code == 200:
+            r = self._client.get(f"{self.base_url}/health", headers=self._headers(False), timeout=2.0)
+            if r.status_code == 200:
                 self._record_success()
                 return True
-            return False
+            self._record_failure()
         except httpx.HTTPError:
-            return False
+            self._record_failure()
+        return False
 
     def status(self) -> Dict[str, Any]:
-        """Aggregate state for a health/monitoring surface — not itself
-        called on every request, so it's safe to poll from a jarvis_health tool."""
-        circuit_open = self._circuit_opened_at is not None
-        cooldown_remaining = 0.0
-        if circuit_open:
-            cooldown_remaining = max(0.0, self.COOLDOWN_SECONDS - (time.monotonic() - self._circuit_opened_at))
-        return {
-            "base_url": self.base_url,
-            "healthy": self.health() if not circuit_open else False,
-            "circuit_open": circuit_open,
-            "cooldown_remaining_seconds": round(cooldown_remaining, 1),
-            "consecutive_failures": self._consecutive_failures,
-        }
+        with self._circuit_lock:
+            opened, failures = self._circuit_opened_at, self._consecutive_failures
+        remaining = 0.0 if opened is None else max(0.0, self.COOLDOWN_SECONDS - (time.monotonic() - opened))
+        return {"base_url": self.base_url, "api_version": self.api_version, "service_id": self.service_id,
+                "team_id": self.team_id, "agent_id": self.agent_id,
+                "healthy": self.health() if opened is None else False,
+                "circuit_open": opened is not None, "cooldown_remaining_seconds": round(remaining, 1),
+                "consecutive_failures": failures}
 
-    def capture(self, user_id: str, data: Union[str, List[Dict]], metadata: Optional[Dict] = None) -> Dict[str, Any]:
-        """
-        Push a conversation turn / memory item into the Gateway. MemoryCore's
-        own L0->L1 pipeline decides what's worth distilling into durable
-        facts (subject to its `everyNConversations` batching threshold —
-        set that to 1 on the Gateway config if you need synchronous,
-        deterministic capture rather than batched extraction).
-        """
-        if isinstance(data, str):
-            turns = [{"role": "user", "content": data}]
+    def capture(self, user_id: str, data: Union[str, List[Dict[str, Any]]], metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        turns = [{"role": "user", "content": data}] if isinstance(data, str) else list(data)
+        metadata = metadata or {}
+        session_id = str(metadata.get("session_id") or metadata.get("workflow_id") or f"profile:{user_id}")
+        if self.api_version == "v3":
+            result = self._request("POST", "/v3/conversation/add", {**self._identity(user_id), "session_id": session_id, "messages": turns})
         else:
-            turns = data
-            
-        body = {
-            "user_id": user_id,
-            "turns": turns,
-            "metadata": metadata or {},
-        }
-        return self._request("POST", "/capture", body)
+            result = self._request("POST", "/capture", {"user_id": user_id, "turns": turns, "metadata": metadata})
+        return result if isinstance(result, dict) else {"data": result}
 
-    def recall(self, user_id: str, query: str, limit: int = 5) -> List[Dict]:
-        body = {"user_id": user_id, "query": query, "limit": limit}
-        result = self._request("POST", "/recall", body)
-        # Normalize: the Gateway may return a bare list or a {"results": [...]}
-        # envelope depending on version — handle both defensively, same
-        # lesson as the mem0 response-shape drift this replaced.
-        if isinstance(result, list):
-            return result
-        elif isinstance(result, dict):
-            return result.get("results", []) or result.get("memories", []) or []
-        elif isinstance(result, str):
-            return [{"memory": result}]
-        return []
+    def recall(self, user_id: str, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        if self.api_version == "v3":
+            result = self._request("POST", "/v3/atomic/search", {**self._identity(user_id), "query": query, "limit": limit})
+        else:
+            result = self._request("POST", "/recall", {"user_id": user_id, "query": query, "limit": limit})
+        data = result.get("data", result) if isinstance(result, dict) else result
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("results", "memories", "items", "records"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+            return [data] if data else []
+        return [{"memory": data}] if isinstance(data, str) else []
 
     def session_end(self, user_id: str) -> Dict[str, Any]:
-        """Drain any in-flight extraction for this profile/session."""
-        return self._request("POST", "/session/end", {"user_id": user_id})
+        return {"status": "ok", "user_id": user_id, "api_version": self.api_version}
 
-    def close(self):
+    def close(self) -> None:
         self._client.close()
