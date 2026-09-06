@@ -51,7 +51,7 @@ jarvis-server
 
 When you run `jarvis-server`, the Orchestrator will automatically:
 1. Boot Ollama in the background.
-2. Download the `kinfra-text-embedding-0.6b` and `llama3.2:1b` models.
+2. Download the `kinfra-text-embedding-0.6b` and `qwen3.5:0.5b` models.
 3. Boot the Memory Gateway.
 4. Launch the MCP Server on `stdio`.
 

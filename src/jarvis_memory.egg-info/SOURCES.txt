@@ -1,6 +1,7 @@
 README.md
 pyproject.toml
 src/jarvis_memory/__init__.py
+src/jarvis_memory/__main__.py
 src/jarvis_memory/config.py
 src/jarvis_memory/core.py
 src/jarvis_memory/gateway_supervisor.py
