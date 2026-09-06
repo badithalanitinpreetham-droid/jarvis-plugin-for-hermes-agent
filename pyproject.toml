@@ -4,34 +4,32 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-memory"
-version = "4.0.0"
-description = "Commercial-grade MCP server for Hermes Agent: Zero-config local AI, self-evolving memory, and autonomous workflows."
+version = "4.1.0"
+description = "MCP server for Hermes Agent with persistent memory and durable autonomous workflows."
 readme = "README.md"
-requires-python = ">=3.9"
-authors = [
-    { name = "Jarvis AI Team", email = "support@jarvis-memory.local" }
-]
+requires-python = ">=3.10"
+authors = [{ name = "Jarvis AI Team" }]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "beautifulsoup4",
-    "lxml",
-    "mcp>=1.0.0",
-    "pydantic",
-    "httpx",
-    "psutil"
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
+    "mcp>=1.0,<2",
+    "pydantic>=2",
+    "httpx>=0.27",
+    "psutil>=5.9"
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
 [project.scripts]
 jarvis-server = "jarvis_memory.orchestrator:main"
