@@ -1,15 +1,4 @@
-"""Jarvis-owned lifecycle for TencentDB Agent Memory and its local Ollama backend.
-
-Jarvis owns the local runtime used by its memory provider:
-- provision the pinned TencentDB source once per Hermes home
-- start Ollama only when Jarvis needs it and preserve ownership across CLI processes
-- ensure the memory LLM and embedding models exist in Ollama
-- start memory-core -> memory-hub -> proxy
-- persist ownership so ``hermes start jarvis`` / ``hermes stop jarvis`` work across processes
-- stop only resources that the persisted Jarvis state says it owns
-
-The actual Tencent deployment remains Tencent's supported shell scripts.
-"""
+"""Jarvis-owned lifecycle for TencentDB Agent Memory and its local Ollama backend."""
 from __future__ import annotations
 
 import json
@@ -26,7 +15,6 @@ TENCENT_REPO = "https://github.com/TencentCloud/TencentDB-Agent-Memory.git"
 TENCENT_PIN = "439f22ace03a08de828597b4eea2661f0978510c"
 DEFAULT_OLLAMA_URL = "http://host.docker.internal:11434/v1"
 DEFAULT_OLLAMA_MODEL = "qwen3.5:4b"
-DEFAULT_EMBEDDING_MODEL = "snowflake-arctic-embed2"
 
 
 class TencentRuntime:
@@ -54,34 +42,21 @@ class TencentRuntime:
             return False
 
     @staticmethod
-    def _run(
-        cmd: list[str],
-        *,
-        cwd: Optional[Path] = None,
-        env: Optional[dict[str, str]] = None,
-        timeout: int = 300,
-        log_file: Optional[Path] = None,
-    ) -> None:
+    def _run(cmd: list[str], *, cwd: Optional[Path] = None, env: Optional[dict[str, str]] = None,
+             timeout: int = 300, log_file: Optional[Path] = None) -> None:
         merged = os.environ.copy()
         if env:
             merged.update(env)
-        stdout = stderr = None
         handle = None
         try:
             if log_file:
                 log_file.parent.mkdir(parents=True, exist_ok=True)
                 handle = log_file.open("ab")
-                stdout = stderr = handle
-            result = subprocess.run(
-                cmd,
-                cwd=str(cwd) if cwd else None,
-                env=merged,
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+                result = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=merged,
+                                        stdout=handle, stderr=handle, timeout=timeout, check=False)
+            else:
+                result = subprocess.run(cmd, cwd=str(cwd) if cwd else None, env=merged,
+                                        timeout=timeout, check=False)
         finally:
             if handle:
                 handle.close()
@@ -125,7 +100,7 @@ class TencentRuntime:
         return target
 
     @staticmethod
-    def _env_file(tencent_root: Path, model: str, embedding_model: str) -> Path:
+    def _env_file(tencent_root: Path, model: str) -> Path:
         deploy = tencent_root / "deploy" / "global-images"
         deploy.mkdir(parents=True, exist_ok=True)
         env_file = deploy / ".env"
@@ -137,9 +112,6 @@ class TencentRuntime:
             "MEMORY_LLM_API_KEY=ollama",
             f"MEMORY_LLM_MODEL={model}",
             "MEMORY_LLM_PROTOCOL=openai",
-            f"EMBEDDING_BASE_URL={DEFAULT_OLLAMA_URL}",
-            "EMBEDDING_API_KEY=ollama",
-            f"EMBEDDING_MODEL={embedding_model}",
             "PROXY_UPSTREAM_URL=" + DEFAULT_OLLAMA_URL,
             "PROXY_UPSTREAM_API_KEY=ollama",
             f"PROXY_UPSTREAM_MODEL={model}",
@@ -159,16 +131,47 @@ class TencentRuntime:
     @staticmethod
     def _process_command(pid: int) -> str:
         try:
-            result = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "command="],
-                capture_output=True,
-                text=True,
-                timeout=3,
-                check=False,
-            )
+            result = subprocess.run(["ps", "-p", str(pid), "-o", "command="],
+                                    capture_output=True, text=True, timeout=3, check=False)
             return result.stdout.strip()
         except (OSError, subprocess.SubprocessError):
             return ""
+
+    @staticmethod
+    def _kill_process_group(pid: int) -> None:
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except OSError:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                return
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+            time.sleep(0.2)
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+    @staticmethod
+    def _ollama_model_available(executable: str, model: str) -> bool:
+        try:
+            result = subprocess.run([executable, "show", model], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL, timeout=20, check=False)
+            return result.returncode == 0
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            return False
+
+    def _ensure_ollama_model(self, home: Path, executable: str, model: str) -> None:
+        if self._ollama_model_available(executable, model):
+            return
+        self._run([executable, "pull", model], timeout=1800,
+                  log_file=home / ".jarvis" / "logs" / "ollama-pull.log")
 
     def _previous_ollama_is_still_owned(self, state: dict[str, object]) -> bool:
         if state.get("ollama_owned") is not True:
@@ -180,66 +183,26 @@ class TencentRuntime:
             return False
         return pid > 0 and "ollama" in self._process_command(pid).lower()
 
-    @staticmethod
-    def _ollama_model_available(executable: str, model: str) -> bool:
-        try:
-            result = subprocess.run(
-                [executable, "show", model],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=20,
-                check=False,
-            )
-            return result.returncode == 0
-        except (FileNotFoundError, OSError, subprocess.SubprocessError):
-            return False
-
-    def _ensure_ollama_models(self, home: Path, executable: str, models: list[str]) -> None:
-        log = home / ".jarvis" / "logs" / "ollama-pull.log"
-        seen: set[str] = set()
-        for model in models:
-            model = model.strip()
-            if not model or model in seen:
-                continue
-            seen.add(model)
-            if self._ollama_model_available(executable, model):
-                continue
-            self._run([executable, "pull", model], timeout=1800, log_file=log)
-
-    def _start_ollama(
-        self,
-        home: Path,
-        model: str,
-        embedding_model: str,
-        previous: dict[str, object],
-    ) -> None:
+    def _start_ollama(self, home: Path, model: str, previous: dict[str, object]) -> None:
         exe = os.environ.get("JARVIS_OLLAMA_EXECUTABLE", "ollama")
         if self._port_open("127.0.0.1", 11434):
             self._ollama_owned = self._previous_ollama_is_still_owned(previous)
-            self._ensure_ollama_models(home, exe, [model, embedding_model])
+            self._ensure_ollama_model(home, exe, model)
             return
-
+        log = home / ".jarvis" / "logs" / "ollama.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
         try:
-            log = home / ".jarvis" / "logs" / "ollama.log"
-            log.parent.mkdir(parents=True, exist_ok=True)
             handle = log.open("ab")
-            self._ollama_process = subprocess.Popen(
-                [exe, "serve"],
-                stdout=handle,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+            self._ollama_process = subprocess.Popen([exe, "serve"], stdout=handle,
+                                                     stderr=subprocess.STDOUT, start_new_session=True)
             handle.close()
             self._ollama_owned = True
         except (FileNotFoundError, OSError) as exc:
-            raise RuntimeError(
-                "Jarvis could not start Ollama. Install Ollama or set JARVIS_OLLAMA_EXECUTABLE."
-            ) from exc
-
+            raise RuntimeError("Jarvis could not start Ollama. Install Ollama or set JARVIS_OLLAMA_EXECUTABLE.") from exc
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if self._port_open("127.0.0.1", 11434):
-                self._ensure_ollama_models(home, exe, [model, embedding_model])
+                self._ensure_ollama_model(home, exe, model)
                 return
             if self._ollama_process.poll() is not None:
                 raise RuntimeError("Ollama exited while Jarvis was starting it.")
@@ -247,74 +210,69 @@ class TencentRuntime:
         raise RuntimeError("Ollama did not become ready on 127.0.0.1:11434 within 30 seconds.")
 
     def _persist_runtime_state(self, home: Path, *, enabled: bool = True) -> None:
+        previous = self._load_state(home)
         state: dict[str, object] = {
-            "version": 2,
+            "version": 3,
             "enabled": enabled,
             "hermes_home": str(home),
-            "tencent_root": str(self._tencent_root) if self._tencent_root else "",
+            "tencent_root": str(self._tencent_root) if self._tencent_root else str(previous.get("tencent_root") or ""),
             "tencent_owned": self._tencent_owned if enabled else False,
             "ollama_owned": self._ollama_owned if enabled else False,
-            "ollama_pid": self._ollama_process.pid if enabled and self._ollama_process is not None else None,
-            "ollama_pgid": self._ollama_process.pid if enabled and self._ollama_process is not None else None,
+            "ollama_pid": self._ollama_process.pid if enabled and self._ollama_process is not None else previous.get("ollama_pid"),
+            "ollama_pgid": self._ollama_process.pid if enabled and self._ollama_process is not None else previous.get("ollama_pgid"),
             "ollama_model": os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
-            "embedding_model": os.environ.get("JARVIS_OLLAMA_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL),
         }
-        # Preserve the last known cross-process Ollama owner PID. This is essential because
-        # ``hermes start jarvis`` and ``hermes stop jarvis`` are separate OS processes.
-        if enabled and self._ollama_process is None:
-            previous = self._load_state(home)
-            if previous.get("ollama_owned") is True:
-                state["ollama_owned"] = True
-                state["ollama_pid"] = previous.get("ollama_pid")
-                state["ollama_pgid"] = previous.get("ollama_pgid")
         self._save_state(home, state)
 
     def start(self, hermes_home: Optional[str] = None, *, force: bool = False) -> None:
         with self._lock:
             if self._started:
                 return
-            if (
-                os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower() in {"0", "false", "no"}
-                and not force
-            ):
+            if (os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower() in {"0", "false", "no"}) and not force:
                 self._started = True
                 return
-
             home = self._home(hermes_home)
             previous = self._load_state(home)
             if previous.get("enabled") is False and not force:
                 self._root = home
                 self._started = True
                 return
-
             model = os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
-            embedding_model = os.environ.get("JARVIS_OLLAMA_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL)
             self._root = home
             previous_root = previous.get("tencent_root")
-            self._tencent_root = Path(str(previous_root)).expanduser() if previous_root else None
-            if self._tencent_root is None or not self._tencent_root.exists():
-                self._tencent_root = self._ensure_tencent_source(home)
-
-            self._start_ollama(home, model, embedding_model, previous)
+            self._tencent_root = Path(str(previous_root)).expanduser() if previous_root else self._ensure_tencent_source(home)
+            self._start_ollama(home, model, previous)
             deploy = self._tencent_root / "deploy" / "global-images"
-            self._env_file(self._tencent_root, model, embedding_model)
+            self._env_file(self._tencent_root, model)
             log = home / ".jarvis" / "logs" / "tencent-runtime.log"
-
-            services_up = all(
-                self._port_open("127.0.0.1", port)
-                for port in (8420, 8125, 8096)
-            )
+            services_up = all(self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096))
             if services_up:
-                # Repeated starts are idempotent. Preserve an existing Jarvis ownership claim
-                # instead of needlessly restarting/removing healthy Tencent containers.
-                self._tencent_owned = bool(previous.get("tencent_owned") is True)
+                self._tencent_owned = previous.get("tencent_owned") is True
             else:
-                for script in ("start-memory-core.sh", "start-memory-hub.sh", "start-proxy.sh"):
-                    self._run(["bash", script], cwd=deploy, timeout=300, log_file=log)
-                self._tencent_owned = True
-
+                try:
+                    for script in ("start-memory-core.sh", "start-memory-hub.sh", "start-proxy.sh"):
+                        self._run(["bash", script], cwd=deploy, timeout=300, log_file=log)
+                    self._tencent_owned = True
+                except Exception:
+                    # Do not leave a partially started Tencent/Ollama stack behind after a failed start.
+                    if self._tencent_owned:
+                        self._stop_tencent(deploy, log)
+                    if self._ollama_owned and self._ollama_process is not None:
+                        self._kill_process_group(self._ollama_process.pid)
+                    self._ollama_process = None
+                    self._ollama_owned = False
+                    self._tencent_owned = False
+                    raise
             self._started = True
             self._persist_runtime_state(home, enabled=True)
+
+    def _stop_tencent(self, deploy: Path, log: Path) -> None:
+        script = deploy / "stop-all.sh"
+        if script.is_file():
+            try:
+                self._run(["bash", str(script)], cwd=deploy, timeout=120, log_file=log)
+            except Exception:
+                pass
 
     def stop(self, hermes_home: Optional[str] = None, *, disable: bool = False) -> None:
         with self._lock:
@@ -323,54 +281,21 @@ class TencentRuntime:
             tencent_root_value = state.get("tencent_root") or self._tencent_root
             tencent_root = Path(str(tencent_root_value)).expanduser() if tencent_root_value else None
             tencent_owned = bool(state.get("tencent_owned") or self._tencent_owned)
-
             if tencent_owned and tencent_root is not None:
-                deploy = tencent_root / "deploy" / "global-images"
-                script = deploy / "stop-all.sh"
-                if script.is_file():
-                    try:
-                        self._run(
-                            ["bash", str(script)],
-                            cwd=deploy,
-                            timeout=120,
-                            log_file=home / ".jarvis" / "logs" / "tencent-runtime.log",
-                        )
-                    except Exception:
-                        pass
-
+                self._stop_tencent(tencent_root / "deploy" / "global-images",
+                                    home / ".jarvis" / "logs" / "tencent-runtime.log")
             ollama_owned = bool(state.get("ollama_owned") or self._ollama_owned)
             ollama_pid_value = state.get("ollama_pid")
-            ollama_pgid_value = state.get("ollama_pgid")
             if ollama_owned and ollama_pid_value:
                 try:
                     pid = int(ollama_pid_value)
-                    pgid = int(ollama_pgid_value or pid)
                 except (TypeError, ValueError):
-                    pid = pgid = 0
+                    pid = 0
                 if pid > 0 and "ollama" in self._process_command(pid).lower():
-                    try:
-                        os.killpg(pgid, signal.SIGTERM)
-                    except OSError:
-                        try:
-                            os.kill(pid, signal.SIGTERM)
-                        except OSError:
-                            pass
-                    deadline = time.monotonic() + 10
-                    while time.monotonic() < deadline and self._process_command(pid):
-                        time.sleep(0.25)
-
-            proc = self._ollama_process
+                    self._kill_process_group(pid)
+            if self._ollama_process is not None and self._ollama_owned:
+                self._kill_process_group(self._ollama_process.pid)
             self._ollama_process = None
-            if proc is not None and proc.poll() is None and self._ollama_owned:
-                try:
-                    os.killpg(proc.pid, signal.SIGTERM)
-                    proc.wait(timeout=10)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-
             self._started = False
             self._ollama_owned = False
             self._tencent_owned = False
@@ -395,9 +320,6 @@ class TencentRuntime:
             "tencent_owned_by_jarvis": bool(state.get("tencent_owned") or self._tencent_owned),
             "tencent_source": str(state.get("tencent_root") or self._tencent_root or ""),
             "ollama_model": state.get("ollama_model") or os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL),
-            "embedding_model": state.get("embedding_model") or os.environ.get(
-                "JARVIS_OLLAMA_EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODEL
-            ),
             "memory_core_reachable": memory_core,
             "memory_hub_reachable": memory_hub,
             "proxy_reachable": proxy,
