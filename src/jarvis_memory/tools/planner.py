@@ -238,7 +238,7 @@ Output ONLY valid JSON in this format:
                     "parameters": {"goal": goal},
                     "confidence": round(base_conf_2, 2),
                     "risk": "medium" if not add_approval else "high",
-                    "requires_approval": True if add_approval else True
+                    "requires_approval": bool(add_approval)
                 }
             ],
             "estimated_steps": 2,
