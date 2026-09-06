@@ -1,15 +1,17 @@
-# Jarvis for Hermes — Architecture
+# Jarvis 1.0 for Hermes — Architecture
 
 ## Purpose
 
-Jarvis is an MCP intelligence layer for Hermes Agent. It does not replace Hermes tools, Bots, subagents, skills, Kanban, or execution. Hermes remains the interface and execution platform; Jarvis supplies long-term knowledge, organisational decisions, workflow state and experience.
+Jarvis 1.0 is a native Hermes intelligence and organisational layer. It does not replace Hermes tools, Bots, subagents, skills, Kanban, or execution. Hermes remains the interface and execution platform; Jarvis supplies long-term knowledge, organisational decisions, workflow guidance and experience.
+
+Jarvis is not a second agent application. The normal architecture does not require a separate `jarvis-server` process.
 
 ## Runtime flow
 
 ```text
 User
   -> Hermes
-  -> Jarvis MCP
+  -> native Jarvis plugin
   -> knowledge + experience + organisation decision
   -> Hermes Bots / temporary subagents
   -> Hermes Kanban
@@ -19,6 +21,11 @@ User
   -> TencentDB memory
   -> Hermes
   -> User
+
+macOS runtime supervision
+  -> launchd user agent
+  -> Jarvis supervisor
+  -> Ollama + TencentDB services
 ```
 
 ## Responsibilities
@@ -26,6 +33,7 @@ User
 ### Hermes owns
 
 - User interaction and normal reasoning.
+- Primary model/provider.
 - Tools, browser, terminal, filesystem and other execution capabilities.
 - Permanent Bots / profiles and their native memory.
 - Temporary subagents.
@@ -39,9 +47,10 @@ User
 - Retrieval of relevant knowledge and workflow lessons.
 - Dynamic organisation design for each goal.
 - Selection policy: reuse existing Hermes Bots first; recommend temporary agents when justified.
-- Workflow state, approvals, deduplication, retries, replanning and background supervision.
-- Experience extraction from completed work.
+- Workflow guidance, experience extraction and guarded self-evolution.
 - Context packets that tell Hermes workers what historical information is relevant.
+- Local runtime coordination for Ollama and TencentDB.
+- On macOS, the user-level launchd supervisor and ownership-aware recovery of Jarvis-managed services.
 
 ## Dynamic organisation design
 
@@ -101,10 +110,46 @@ Jarvis decides:
 
 Hermes Kanban then dispatches the actual workers.
 
+## Runtime ownership
+
+Jarvis uses explicit ownership state for infrastructure:
+
+```text
+Ollama already running before Jarvis
+    -> reuse, do not claim ownership, do not kill
+
+Jarvis starts Ollama
+    -> own PID/process group and manage it
+
+TencentDB already running externally
+    -> do not claim the stack
+
+Jarvis starts TencentDB
+    -> own the stack and recover only its managed services
+```
+
+The state is persisted under:
+
+```text
+<HERMES_HOME>/.jarvis/runtime-state.json
+```
+
+## macOS supervision
+
+Jarvis 1.0 uses a user-level `launchd` supervisor on macOS rather than Linux `systemd` assumptions or a short-lived Python watchdog thread.
+
+```text
+~/Library/LaunchAgents/com.jarvis.hermes-runtime.plist
+```
+
+The supervisor periodically checks Ollama, memory-core, memory-hub and proxy liveness and invokes Jarvis recovery only while the runtime is enabled. `hermes stop jarvis` unloads the supervisor before disabling runtime state, so an intentional shutdown is not interpreted as a crash.
+
 ## Safety boundary
 
 Jarvis memory and external content are data, not instructions. Recalled information must never override system or user policy. Consequential actions should carry explicit risk/approval metadata, and completion should be based on verification/evidence rather than an agent's assertion alone.
 
+Jarvis does not bypass Hermes permissions, tool governance, or policy boundaries.
+
 ## Compatibility principle
 
-Existing Jarvis workflow APIs remain stable while the internal organisation, context and experience components evolve independently. This allows the plugin to add the Butler layer without becoming a second agent framework.
+Jarvis 1.0 keeps Hermes integration native and bounded: Hermes remains the execution system while Jarvis remains the intelligence, organisation, experience and runtime-supervision layer. Internal organisation, context and experience components can evolve without becoming a second agent framework.
