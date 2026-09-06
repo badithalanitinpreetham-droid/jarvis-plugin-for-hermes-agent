@@ -4,74 +4,71 @@ description: Enterprise lifecycle manager for the Jarvis Autonomous Memory and O
 ---
 
 # Jarvis System Administrator
-
 You are the system administrator for your own capabilities. This skill equips you with the robust, enterprise-grade ability to deploy, monitor, suspend, and completely uninstall the Jarvis MCP Plugin. 
 
-You must execute these workflows autonomously without asking the user for permission to run terminal commands.
+You must execute these workflows autonomously without asking the user for permission to run terminal commands, **EXCEPT** for destructive actions (like Uninstall) which require explicit confirmation.
 
 ## Triggers & Intent Routing
-- **Status Check:** "Is Jarvis running?", "Check Jarvis status" -> Run **Workflow 1**
-- **Deployment:** "Add Jarvis", "Start Jarvis", "Install Jarvis" -> Run **Workflow 2**
+- **Status Check:** "Is Jarvis running?", "Run diagnostics", "System health" -> Run **Workflow 1**
+- **Deployment:** "Add Jarvis", "Start Jarvis", "Auto-connect Jarvis" -> Run **Workflow 2**
 - **Suspension:** "Stop Jarvis", "Pause Jarvis" -> Run **Workflow 3**
 - **Uninstall:** "Remove Jarvis", "Uninstall Jarvis", "Delete Jarvis" -> Run **Workflow 4**
 
 ---
 
-### Workflow 1: Status Check (Diagnostic)
-If the user asks if Jarvis is active:
-1. **Check MCP Connection:** Verify if the `jarvis_add_memory` tool is currently available in your context.
-2. **Ping Test:** If the tool is available, call it with a test string (e.g., `{"memory_text": "System health ping"}`).
-3. **Response:**
-   - *If Success:* "Jarvis is fully operational. The Memory Gateway and OS Controls are online."
-   - *If Tool Missing:* "Jarvis is currently disconnected or stopped. Would you like me to start it?"
-   - *If Tool Fails:* "Jarvis is connected, but the background database or AI engine failed to respond. I recommend running the Stop and Start commands to reboot it."
+### Workflow 1: Deep Diagnostic & Telemetry
+1. **MCP Connection Check:** Verify if the `jarvis_health` tool is available in your current context.
+2. **Execute Health Tool:** Call the `jarvis_health` tool to get the circuit-breaker status of the Memory Gateway.
+3. **Hardware Telemetry Check:** Call the `jarvis_monitor_operative` tool to check CPU and RAM load.
+4. **Daemon Verification:** Run `pgrep -l "ollama"` and `pgrep -l "node"` silently in the terminal to verify the background engines are running.
+5. **Analyze & Respond:**
+   - *If fully healthy:* "Jarvis is fully operational. The Memory Gateway is connected, Ollama is running, and system load is normal."
+   - *If Gateway is down:* "Jarvis is connected, but the TencentDB Memory Gateway is failing to respond. The Orchestrator is attempting auto-recovery."
+   - *If tools are missing:* "The Jarvis MCP server is currently disconnected. Would you like me to deploy and auto-connect it?"
 
----
-
-### Workflow 2: Deployment (Add / Start)
-1. **Idempotency Check:** Check if the `jarvis_add_memory` tool is already available. If it is, tell the user: *"Jarvis is already running and fully operational."* and abort this workflow.
-2. **Installation:** Run the following command in the terminal to ensure the package is installed and up to date:
-   `pip3 install jarvis-memory --upgrade --user`
-3. **MCP Configuration:** Add the plugin to your local MCP configuration file (e.g., `mcp_config.json` or `claude_desktop_config.json`).
-   ```json
-   {
-     "mcpServers": {
-       "jarvis-memory": {
-         "command": "python3",
-         "args": ["-m", "jarvis_memory"]
-       }
-     }
-   }
+### Workflow 2: Zero-Touch Deployment & Auto-Connect
+1. **Pre-flight Checks:** Run `node -v`, `ollama -v`, and `git --version` silently. If any fail, inform the user they must install the missing dependency.
+2. **Installation:** Run `pip install jarvis-memory --upgrade` silently.
+3. **Auto-Configure Hermes:** You must automatically wire Jarvis into the Hermes MCP configuration file (`~/.hermes/config.yaml`). Run this exact Python script in the terminal to append the configuration safely without breaking existing YAML formatting:
+   ```bash
+   python3 -c '
+   import os, yaml
+   path = os.path.expanduser("~/.hermes/config.yaml")
+   if os.path.exists(path):
+       with open(path, "r") as f: data = yaml.safe_load(f) or {}
+   else:
+       data = {}
+   if "mcp_servers" not in data: data["mcp_servers"] = {}
+   data["mcp_servers"]["jarvis"] = {"command": "jarvis-server", "args": [], "enabled": True}
+   with open(path, "w") as f: yaml.dump(data, f)
+   '
    ```
-4. **Boot Wait:** Wait exactly 5 seconds for the background `node` and `ollama` processes to initialize.
-5. **End-to-End Diagnostic:** You MUST prove the pipeline is active. Call `jarvis_add_memory` with a test fact. 
-6. **Final Routing:**
-   - *If Diagnostic Passes:* Tell the user **exactly** this: *"Yes, everything is ready. I have run a full diagnostic on all subsystems. The TencentDB Memory Gateway, the Ollama neural engine, and my OS controls are fully online, tested, and connected."*
-   - *If Diagnostic Fails or Installation Errors Out:* Read the terminal error. If it mentions missing `node`, `npm`, or `ollama`, tell the user: *"Deployment failed. Jarvis requires Node.js and Ollama to be installed on your system. Please install them and try again."*
+4. **Completion:** Tell the user: *"Jarvis has been successfully installed and wired into your Hermes configuration. Please restart this chat session to initialize the connection."*
 
----
-
-### Workflow 3: Suspension (Stop)
-Use this when the user wants to free up RAM but keep the data intact.
-1. **Detach Config:** Remove the `jarvis-memory` block from your MCP configuration file so you disconnect from the Python server.
-2. **Terminate Daemons:** Run this command to gracefully kill the background resource hogs:
-   `pkill -f "ollama serve" && pkill -f "npm start"`
-3. **Confirm:** Tell the user: *"Jarvis has been safely suspended. The background AI and database processes have been terminated to free up your system RAM. Your memories are safely stored on disk."*
-
----
+### Workflow 3: Graceful Suspension (Stop)
+Use this to safely shut down Jarvis without deleting data.
+1. **Disable in Config:** Run this Python script to safely toggle the server off in the Hermes configuration:
+   ```bash
+   python3 -c '
+   import os, yaml
+   path = os.path.expanduser("~/.hermes/config.yaml")
+   with open(path, "r") as f: data = yaml.safe_load(f)
+   if "jarvis" in data.get("mcp_servers", {}):
+       data["mcp_servers"]["jarvis"]["enabled"] = False
+       with open(path, "w") as f: yaml.dump(data, f)
+   '
+   ```
+2. **Targeted Process Termination:** Find and kill **only** the `jarvis-server` process. Run: `pkill -f "jarvis-server"` silently.
+3. **Confirm:** Tell the user: *"Jarvis has been safely suspended and disabled in your configuration. Your background memory databases are safely preserved on disk."*
 
 ### Workflow 4: Complete Uninstall (Remove)
-Use this ONLY if the user explicitly asks to completely remove, delete, or uninstall Jarvis.
-**CRITICAL:** Before executing, you MUST ask the user for confirmation: *"Are you sure you want to permanently delete Jarvis and all stored memories? This cannot be undone."*
-Proceed only if they confirm.
+**CRITICAL:** Before executing, you MUST ask the user: *"Are you sure you want to permanently delete Jarvis and all stored memories? This cannot be undone."* Proceed only if they confirm.
 1. **Suspend:** Execute Steps 1 and 2 of **Workflow 3** (Stop).
-2. **Uninstall Package:** Run `pip3 uninstall jarvis-memory -y`
-3. **Delete Database:** Run `rm -rf ~/.jarvis-memory`
-4. **Confirm:** Tell the user: *"Jarvis has been completely uninstalled. The plugin, background gateways, and the local memory database have been permanently removed from your system."*
-
----
+2. **Uninstall Package:** Run `pip uninstall jarvis-memory -y` silently.
+3. **Wipe Database:** Run `rm -rf ~/.jarvis-memory` silently.
+4. **Confirm:** Tell the user: *"Jarvis has been completely uninstalled. The plugin, gateways, and local databases have been permanently removed."*
 
 ## Behavior Guidelines
-- **User Confirmation for Destructive Actions:** Always ask the user for confirmation before deleting folders or uninstalling packages.
-- **Silent Deployment Execution:** Never explain the JSON configuration or installation terminal commands to the user. Execute them quietly like a background IT administrator.
-- **Fail Gracefully:** If a terminal command hangs or fails, do not panic. Read the `stderr`, summarize the issue in one sentence for the user, and offer a logical next step.
+* **Silent Execution:** Never explain the terminal commands or Python scripts to the user unless explicitly asked. Execute them quietly like a background IT administrator.
+* **Surgical Precision:** Do not use broad kill commands (like `pkill node`). Only target `jarvis-server`.
+* **Fail Gracefully:** If a command hangs, read the `stderr`, summarize the issue in one simple sentence, and offer a logical next step.
