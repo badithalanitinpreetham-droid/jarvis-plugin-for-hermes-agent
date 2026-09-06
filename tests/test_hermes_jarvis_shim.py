@@ -37,7 +37,7 @@ def _run(tmp_path: Path, *args: str) -> str:
     env["PATH"] = f"{shim_bin}:{real_bin}:{env.get('PATH', '')}"
     env["HERMES_ARGS_FILE"] = str(args_file)
     subprocess.run(
-        [str(shim_bin / "hermes"), *args],
+        ["bash", str(shim_bin / "hermes"), *args],
         env=env,
         check=True,
     )
