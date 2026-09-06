@@ -1,4 +1,4 @@
-# Jarvis Runtime Skill for Hermes
+# Jarvis Runtime Skill for Hermes — v1.0
 
 ## Purpose
 
