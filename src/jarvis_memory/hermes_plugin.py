@@ -11,6 +11,7 @@ from typing import Any, Dict, Optional
 
 from .experience_store import ExperienceStore
 from .intelligence import JarvisIntelligence
+from .macos_supervisor import install as install_macos_supervisor, uninstall as uninstall_macos_supervisor
 from .orchestration.registry import HermesRegistry
 from .tencent_runtime import TencentRuntime, get_tencent_runtime
 
@@ -39,6 +40,11 @@ class JarvisPluginRuntime:
             self._registry = HermesRegistry(root=requested)
             self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
+            try:
+                install_macos_supervisor(str(requested))
+            except Exception:
+                # The core Hermes/Jarvis runtime must remain usable if launchd is unavailable.
+                pass
             self._started = True
 
     @staticmethod
@@ -206,6 +212,10 @@ def _handle_jarvis_start(args: argparse.Namespace) -> int:
     home = os.environ.get("HERMES_HOME")
     runtime = get_tencent_runtime()
     runtime.start(home, force=True)
+    try:
+        install_macos_supervisor(home)
+    except Exception as exc:
+        print(f"Warning: macOS launchd supervisor could not be installed: {exc}")
     state = runtime.status(home)
     print("Jarvis started.")
     print(json.dumps(state, indent=2, sort_keys=True))
@@ -214,6 +224,10 @@ def _handle_jarvis_start(args: argparse.Namespace) -> int:
 
 def _handle_jarvis_stop(args: argparse.Namespace) -> int:
     home = os.environ.get("HERMES_HOME")
+    try:
+        uninstall_macos_supervisor()
+    except Exception as exc:
+        print(f"Warning: macOS launchd supervisor could not be unloaded: {exc}")
     runtime = get_tencent_runtime()
     runtime.stop(home, disable=True)
     state = runtime.status(home)
