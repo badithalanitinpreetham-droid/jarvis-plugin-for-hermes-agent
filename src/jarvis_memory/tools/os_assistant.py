@@ -16,9 +16,7 @@ class OSAssistant:
     def speak(text: str) -> str:
         """Use the native macOS TTS engine to speak text out loud."""
         try:
-            # Escape single quotes for bash
-            safe_text = text.replace("'", "\\'")
-            subprocess.run(["say", safe_text], check=True)
+            subprocess.run(["say", text], check=True)
             return f"Successfully spoke: {text}"
         except Exception as e:
             return f"Failed to speak: {str(e)}"
@@ -75,15 +73,18 @@ class OSAssistant:
                 return "Screen locked/sleeping"
                 
             elif action == "play_pause_media":
-                apple_script = 'tell application "System Events" to key code 53 using command down' # Fallback for media key
-                # Actually, standard media play/pause key code is 100, but requires specific targeting.
-                # Let's use standard Music/Spotify toggles if available, or just generic key code.
                 script = '''
-                tell application "Spotify"
-                    playpause
-                end tell
+                try
+                    tell application "Spotify" to playpause
+                on error
+                    try
+                        tell application "Music" to playpause
+                    on error
+                        error "Neither Spotify nor Music is running"
+                    end try
+                end try
                 '''
-                subprocess.run(["osascript", "-e", script])
+                subprocess.run(["osascript", "-e", script], check=True, stderr=subprocess.PIPE)
                 return "Toggled play/pause (Targeting Spotify/Music)"
                 
             else:
