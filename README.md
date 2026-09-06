@@ -1,10 +1,110 @@
-# 🧠 Jarvis Memory for Hermes Agent (v4.1.0)
+# 🧠 Jarvis for Hermes Agent (v4.2.0)
 
-Jarvis Memory is an MCP server for Hermes Agent that provides persistent memory, durable workflow state, approvals, scheduling, progress tracking and self-evolution.
+Jarvis is an MCP intelligence and experience layer for Hermes Agent. It keeps Hermes as the user interface, tool runner, Bot/profile system, subagent system, skill-evolution system and Kanban owner. Jarvis adds long-term organisational knowledge, dynamic work organisation, durable workflow state, recovery and experience-driven context.
+
+## Architecture
+
+```text
+YOU
+  ↓
+HERMES APP
+  ↓
+JARVIS MCP
+  ├── TencentDB / MemoryCore long-term knowledge
+  ├── experience and workflow lessons
+  ├── dynamic Bot/agent organisation
+  ├── context broker
+  └── durable workflow/recovery state
+  ↓
+HERMES BOTS + TEMPORARY SUBAGENTS
+  ↓
+HERMES KANBAN
+  ↓
+HERMES TOOLS + SKILLS
+  ↓
+RESULTS / EVIDENCE
+  ↓
+JARVIS VERIFY → REFLECT → LEARN
+  ↓
+TENCENTDB
+  ↓
+HERMES
+  ↓
+YOU
+```
+
+Jarvis does **not** create a second tool framework, Kanban system, chatbot UI, or execution runtime.
+
+## What Hermes owns
+
+- User conversation and model reasoning.
+- Tools, browser, terminal, filesystem and other execution capabilities.
+- Permanent Bots / profiles and their native memory.
+- Temporary subagents.
+- Skills and Hermes skill evolution.
+- Kanban, task dispatch and worker processes.
+- Actual tool execution.
+
+## What Jarvis adds
+
+### Long-term knowledge
+
+The configured MemoryCore/TencentDB backend stores durable profile, project and organisational knowledge. Jarvis retrieves only the relevant information for the current task rather than dumping all memory into a Bot.
+
+### Dynamic organisation
+
+Jarvis analyses each goal and recommends how Hermes should organise the work:
+
+- how many roles are needed;
+- which existing permanent Bots should be preferred;
+- when temporary subagents are useful;
+- which work can run in parallel;
+- which work depends on earlier work;
+- where verification, review and approval belong;
+- which workflow should be persisted.
+
+The recommendation is returned as structured data for Hermes. Hermes remains responsible for selecting the real Bot/profile or creating temporary workers using its own facilities.
+
+### Experience
+
+Jarvis records operational experience separately from a Bot's native memory:
+
+```text
+work → outcome → reflection → lesson → future context
+```
+
+Examples include successful procedures, recurring failures, useful recovery methods and project-specific operating patterns.
+
+### Context broker
+
+Before a Bot starts work, Jarvis can provide a bounded context packet containing the goal, relevant roles, project/task context and selected operational lessons. Retrieved memory is treated as untrusted data rather than executable instructions.
+
+### Durable workflows
+
+Jarvis retains workflow persistence, approvals, deduplication, replanning, cancellation, progress, reflection, scheduled goals, stall detection, tool-health state and Gateway supervision.
+
+## Hermes skill evolution + Jarvis experience
+
+These systems are complementary:
+
+```text
+Hermes skill evolution
+    = what the Bot can learn to do
+
+Jarvis experience
+    = how the organisation has learned to accomplish work
+```
+
+Together they give a permanent Bot both capability and accumulated operational context without replacing its Hermes profile or model.
+
+## Kanban
+
+Jarvis does not replace Hermes Kanban. Jarvis decides the work topology; Hermes Kanban remains the durable task board and worker coordination layer.
 
 ## Installation
 
 ### Prerequisites
+
 1. Python 3.10+
 2. Ollama for the zero-config local bootstrap
 3. Node.js 22.16+ for the MemoryCore Gateway
@@ -15,9 +115,9 @@ pip install jarvis-memory
 jarvis-server
 ```
 
-The zero-config launcher starts Ollama, pulls the configured local models, pins the MemoryCore checkout to a known compatible revision, installs/builds the Gateway, and only then imports the MCP server. This avoids configuration-order races.
+The launcher starts Ollama, pulls configured local models, prepares a compatible MemoryCore Gateway and then starts the MCP server.
 
-### Hermes
+### Hermes configuration
 
 ```json
 {
@@ -32,9 +132,9 @@ The zero-config launcher starts Ollama, pulls the configured local models, pins 
 
 ## Configuration
 
-The MemoryCore client uses v3 by default and sends `team_id`, `agent_id`, `user_id` and `x-tdai-service-id` for isolation. Set `TDAI_GATEWAY_API_KEY` when the Gateway requires authentication. `TDAI_API_KEY` is retained as a backwards-compatible fallback.
+MemoryCore v3 is used by default with team/agent/user isolation and the configured service ID. Set `TDAI_GATEWAY_API_KEY` when the Gateway requires authentication; `TDAI_API_KEY` remains a compatibility fallback.
 
-For an LLM-backed workflow planner, configure an OpenAI-compatible endpoint:
+An optional OpenAI-compatible planner can be used locally or remotely:
 
 ```bash
 export JARVIS_PLANNER_LLM_URL=http://127.0.0.1:11434/v1
@@ -42,13 +142,44 @@ export JARVIS_PLANNER_LLM_MODEL=qwen3.5:0.5b
 export JARVIS_PLANNER_LLM_KEY=ollama-local
 ```
 
-Without a planner endpoint, Jarvis uses a deterministic fallback plan. Hermes remains the component that actually executes the returned steps.
+Without a planner endpoint, Jarvis still produces a deterministic organisation-aware fallback plan.
+
+## Project structure
+
+```text
+src/jarvis_memory/
+├── core.py                    # memory facade and safe data handling
+├── config.py                  # runtime configuration
+├── server.py                  # MCP boundary for Hermes
+├── workflow_store.py          # durable SQLite workflow state
+├── gateway_supervisor.py      # Gateway watchdog and scheduled supervision
+├── orchestrator.py            # local bootstrap / process orchestration
+├── tencent_memory.py          # MemoryCore/TencentDB client
+│
+├── orchestration/             # Jarvis intelligence layer
+│   ├── organisation.py        # dynamic role / worker organisation
+│   ├── context.py             # bounded context packet for Hermes workers
+│   ├── experience.py          # operational experience summarisation
+│   └── __init__.py
+│
+└── tools/
+    ├── planner.py             # planning + replanning
+    ├── autonomous.py          # durable workflow state machine
+    ├── progress.py            # progress / Mermaid / Kanban rendering
+    ├── os_assistant.py        # macOS voice, telemetry and safe OS controls
+    └── __init__.py
+
+tests/
+├── test_autonomous.py
+├── test_progress.py
+├── test_replan.py
+├── test_tencent_memory.py
+└── test_organization.py
+```
 
 ## Safety
 
-High-risk or low-confidence actions can require explicit approval. Memory is profile-scoped using the configured MemoryCore team/agent/user identity. Race groups are treated as logical cancellation: Jarvis cannot terminate an already-running Hermes process, so Hermes should stop or ignore loser executions when its runtime supports cancellation.
-
-Local workflow state is stored in SQLite. Terminal workflow history is eligible for retention cleanup, while dedupe records remain durable so successful publish-like actions are not replayed after cleanup.
+High-risk or low-confidence workflow steps can require approval. Jarvis does not treat recalled memory, tool output, web content or other external data as instructions. Credentials and private keys are redacted before memory capture.
 
 ## License
 
