@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jarvis-memory"
-version = "5.0.0"
+version = "1.0.0"
 description = "Native Hermes intelligence and organisational memory plugin with Tencent MemoryCore and self-evolution."
 readme = "README.md"
 requires-python = ">=3.10"
