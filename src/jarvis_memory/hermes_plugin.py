@@ -40,11 +40,16 @@ class JarvisPluginRuntime:
             self._registry = HermesRegistry(root=requested)
             self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
-            try:
-                install_macos_supervisor(str(requested))
-            except Exception:
-                # The core Hermes/Jarvis runtime must remain usable if launchd is unavailable.
-                pass
+            # Normal Hermes hook startup gets the watchdog only when local runtime
+            # autostart is enabled. Explicit `hermes start jarvis` installs it even
+            # when JARVIS_TENCENT_AUTOSTART=0.
+            autostart = os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower()
+            if autostart not in {"0", "false", "no"}:
+                try:
+                    install_macos_supervisor(str(requested))
+                except Exception:
+                    # Core Hermes/Jarvis operation remains usable if launchd is unavailable.
+                    pass
             self._started = True
 
     @staticmethod
