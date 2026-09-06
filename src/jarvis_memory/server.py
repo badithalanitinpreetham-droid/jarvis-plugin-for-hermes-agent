@@ -152,6 +152,15 @@ async def list_tools() -> List[types.Tool]:
             }
         ),
         types.Tool(
+            name="jarvis_get_pending_workflows",
+            description="Get a list of all active or stalled workflow IDs, including proactive crons or system recovery tasks. Use this periodically or after a restart.",
+            inputSchema={
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        ),
+        types.Tool(
             name="jarvis_get_next_step",
             description="Get the current pending/next step of a workflow without advancing it. Use after a restart to see where a workflow left off.",
             inputSchema={
@@ -388,6 +397,16 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
                 arguments["workflow_id"], arguments["plan"], arguments["profile_id"]
             )
             return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "jarvis_get_pending_workflows":
+            workflows = []
+            all_wfs = dict(autonomous_executor.active_workflows)
+            if autonomous_executor.store:
+                all_wfs.update(autonomous_executor.store.load_all())
+            for wid, wstate in all_wfs.items():
+                if wstate.get("status") in ("running", "awaiting_approval"):
+                    workflows.append({"id": wid, "goal": wstate.get("plan", {}).get("goal"), "status": wstate.get("status")})
+            return [types.TextContent(type="text", text=json.dumps({"pending_workflows": workflows}, indent=2))]
 
         elif name == "jarvis_get_next_step":
             result = autonomous_executor.get_next_step(arguments["workflow_id"])
