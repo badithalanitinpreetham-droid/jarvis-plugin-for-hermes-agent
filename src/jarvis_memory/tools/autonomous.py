@@ -290,6 +290,7 @@ class AutonomousExecutor:
         record = {
             "step_id": step_id,
             "action": valid_step.get("action"),
+            "tool": valid_step.get("tool"),
             "status": status,
             "output": output,
             "error": error,
@@ -302,20 +303,29 @@ class AutonomousExecutor:
             if valid_step.get("dedupe_key"):
                 self.store.mark_dedupe_done(valid_step["dedupe_key"], workflow_id, step_id)
             
+            import re
+            repair_match = re.search(r"TOOL REPAIR: Diagnose and fix broken tool '([^']+)'", valid_step.get("action", ""))
+            if repair_match and self.store:
+                self.store.mark_tool_fixed(repair_match.group(1))
+            
             if race_group:
                 # Cancel all other steps in the race group
                 group_step_count = 0
                 for s in steps[idx:]:
                     if s.get("race_group_id") == race_group:
                         group_step_count += 1
-                        if s.get("id") != step_id:
+                        loser_id = s.get("id")
+                        if loser_id != step_id:
                             state["history"].append({
-                                "step_id": s.get("id"),
+                                "step_id": loser_id,
                                 "action": s.get("action"),
                                 "status": "cancelled_by_race_winner",
                                 "output": f"Cancelled because step {step_id} won the race.",
                                 "reported_at": self._now_iso()
                             })
+                            # Clean up from failed_steps if a previous loser was recorded (Bug E)
+                            if loser_id in state["failed_steps"]:
+                                state["failed_steps"].remove(loser_id)
                     else:
                         break
                 # Advance index past the entire group
@@ -362,8 +372,14 @@ class AutonomousExecutor:
             )
 
         # --- Auto-replan on failure ---
-        if status != "success" and self.planner and state.get("replan_count", 0) < self.replan_max_retries:
-            return self._auto_replan(workflow_id, valid_step, error or "Unknown error")
+        if status != "success":
+            if self.planner and state.get("replan_count", 0) < self.replan_max_retries:
+                return self._auto_replan(workflow_id, valid_step, error or "Unknown error")
+            else:
+                # Replan exhausted or unavailable — abort workflow
+                state["status"] = "completed_with_failures" if state["completed_steps"] else "failed"
+                self._persist(workflow_id)
+                return self.get_next_step(workflow_id)
 
         return self.get_next_step(workflow_id)
 
@@ -584,12 +600,12 @@ class AutonomousExecutor:
         if state is None:
             return {"error": "Workflow not found"}
 
-        history = state["history"]
+        history = state.get("archived_history", []) + state.get("history", [])
         goal = state["plan"].get("goal", "")
         completed = state["completed_steps"]
         failed = state["failed_steps"]
         replan_count = state.get("replan_count", 0)
-        total_steps = len(state["plan"]["steps"])
+        total_steps = len(state["plan"]["steps"]) + (len(state.get("archived_history", [])) // 2) # Rough estimate
 
         # --- Extract structured patterns ---
         successful_actions = []
@@ -599,19 +615,17 @@ class AutonomousExecutor:
 
         for h in history:
             action = h.get("action", "")
+            tool = h.get("tool", "unknown")
             if h["status"] == "success":
                 successful_actions.append(action)
-                # Extract tool from the plan step if available
-                for s in state["plan"]["steps"]:
-                    if s.get("id") == h.get("step_id"):
-                        successful_tools.add(s.get("tool", "unknown"))
-            elif h["status"] not in ("skipped_duplicate", "cancelled"):
+                if tool != "unknown":
+                    successful_tools.add(tool)
+            elif h["status"] not in ("skipped_duplicate", "cancelled", "cancelled_by_race_winner"):
                 failed_actions.append(f"{action}: {h.get('error', 'unknown error')}")
-                for s in state["plan"]["steps"]:
-                    if s.get("id") == h.get("step_id"):
-                        failed_tools.add(s.get("tool", "unknown"))
+                if tool != "unknown":
+                    failed_tools.add(tool)
 
-        success_rate = len(completed) / total_steps if total_steps > 0 else 0
+        success_rate = len(successful_actions) / max(1, (len(successful_actions) + len(failed_actions)))
 
         # --- Build lesson text (searchable by future recall) ---
         lesson_parts = [

@@ -420,33 +420,51 @@ Output ONLY valid JSON in this format:
             }
 
         failed_step_data = steps[failed_idx]
-        remaining_steps = steps[failed_idx + 1:]
-
-        # Build the retry step — same action but with alternative approach marker
-        retry_confidence = max(0.3, failed_step_data.get("confidence", 0.7) - 0.2)
-        retry_step = {
-            "id": failed_step_data.get("id", failed_step),
-            "action": f"[RETRY] {failed_step_data.get('action', 'Unknown action')}",
-            "tool": failed_step_data.get("tool", "execute"),
-            "parameters": {
-                **failed_step_data.get("parameters", {}),
-                "_retry_reason": error[:200],
-                "_original_step_id": failed_step,
-            },
-            "confidence": round(retry_confidence, 2),
-            "risk": failed_step_data.get("risk", "medium"),
-            "requires_approval": True,  # Always gate retries for safety
-            "approach": "alternative",
-        }
         
-        if "dedupe_key" in failed_step_data:
-            retry_step["dedupe_key"] = failed_step_data["dedupe_key"]
+        # If it's a race group, find all members
+        race_group = failed_step_data.get("race_group_id")
+        retry_steps = []
+        if race_group:
+            # Find start and end of race group
+            start_idx = failed_idx
+            while start_idx > 0 and steps[start_idx - 1].get("race_group_id") == race_group:
+                start_idx -= 1
             
-        if "race_group_id" in failed_step_data:
-            retry_step["race_group_id"] = failed_step_data["race_group_id"]
+            end_idx = failed_idx
+            while end_idx < len(steps) - 1 and steps[end_idx + 1].get("race_group_id") == race_group:
+                end_idx += 1
+                
+            failed_steps_group = steps[start_idx:end_idx + 1]
+            remaining_steps = steps[end_idx + 1:]
+        else:
+            failed_steps_group = [failed_step_data]
+            remaining_steps = steps[failed_idx + 1:]
+
+        # Build retry steps
+        for fs in failed_steps_group:
+            retry_confidence = max(0.3, fs.get("confidence", 0.7) - 0.2)
+            retry_step = {
+                "id": fs.get("id", failed_step),
+                "action": f"[RETRY] {fs.get('action', 'Unknown action')}",
+                "tool": fs.get("tool", "execute"),
+                "parameters": {
+                    **fs.get("parameters", {}),
+                    "_retry_reason": error[:200],
+                    "_original_step_id": fs.get("id", failed_step),
+                },
+                "confidence": round(retry_confidence, 2),
+                "risk": fs.get("risk", "medium"),
+                "requires_approval": True,
+                "approach": "alternative",
+            }
+            if "dedupe_key" in fs:
+                retry_step["dedupe_key"] = fs["dedupe_key"]
+            if "race_group_id" in fs:
+                retry_step["race_group_id"] = fs["race_group_id"]
+            retry_steps.append(retry_step)
 
         # Preserve remaining steps with their original IDs
-        new_steps = [retry_step]
+        new_steps = retry_steps
         for step in remaining_steps:
             preserved = dict(step)
             new_steps.append(preserved)
