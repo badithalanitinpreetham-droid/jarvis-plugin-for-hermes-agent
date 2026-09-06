@@ -68,15 +68,20 @@ class TestHermesRegistry(unittest.TestCase):
     def test_registry_cache_reuses_snapshot_until_ttl(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / ".hermes"
-            root.mkdir()
+            profile = root / "profiles" / "researcher"
+            profile.mkdir(parents=True)
             (root / "config.yaml").write_text("description: Default\n", encoding="utf-8")
+            (profile / "config.yaml").write_text("description: Initial\n", encoding="utf-8")
             registry = HermesRegistry(root, discovery_ttl=60)
             first = registry.discover()
-            (root / "config.yaml").write_text("description: Changed\n", encoding="utf-8")
+            self.assertEqual(first["profile_count"], 2)
+            (profile / "config.yaml").write_text("description: Changed\n", encoding="utf-8")
             second = registry.discover()
-            self.assertEqual(first["profiles"][0]["description"], second["profiles"][0]["description"])
+            researcher = next(item for item in second["profiles"] if item["id"] == "researcher")
+            self.assertEqual(researcher["description"], "Initial")
             fresh = registry.discover(force_refresh=True)
-            self.assertEqual(fresh["profiles"][0]["description"], "Changed")
+            researcher = next(item for item in fresh["profiles"] if item["id"] == "researcher")
+            self.assertEqual(researcher["description"], "Changed")
 
 
 class TestWorkflowHardening(unittest.TestCase):
