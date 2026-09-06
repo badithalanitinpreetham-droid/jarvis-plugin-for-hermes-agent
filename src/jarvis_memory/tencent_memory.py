@@ -30,7 +30,7 @@ silently, but better to catch it once at setup than mid-run.
 import logging
 import os
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import httpx
 
@@ -138,7 +138,7 @@ class TencentMemoryClient:
             "consecutive_failures": self._consecutive_failures,
         }
 
-    def capture(self, user_id: str, text: str, metadata: Optional[Dict] = None) -> Dict[str, Any]:
+    def capture(self, user_id: str, data: Union[str, List[Dict]], metadata: Optional[Dict] = None) -> Dict[str, Any]:
         """
         Push a conversation turn / memory item into the Gateway. MemoryCore's
         own L0->L1 pipeline decides what's worth distilling into durable
@@ -146,9 +146,14 @@ class TencentMemoryClient:
         set that to 1 on the Gateway config if you need synchronous,
         deterministic capture rather than batched extraction).
         """
+        if isinstance(data, str):
+            turns = [{"role": "user", "content": data}]
+        else:
+            turns = data
+            
         body = {
             "user_id": user_id,
-            "turns": [{"role": "user", "content": text}],
+            "turns": turns,
             "metadata": metadata or {},
         }
         return self._request("POST", "/capture", body)
