@@ -87,6 +87,32 @@ class TestTencentRuntime(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "does not own it"):
                     runtime.recover(str(home))
 
+    def test_recovery_refuses_to_claim_external_tencent_stack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".hermes"
+            state_dir = home / ".jarvis"
+            source = state_dir / "tencentdb" / "source"
+            (source / "deploy" / "global-images").mkdir(parents=True)
+            state_dir.mkdir(parents=True, exist_ok=True)
+            (state_dir / "runtime-state.json").write_text(
+                json.dumps({
+                    "version": 3,
+                    "enabled": True,
+                    "tencent_root": str(source),
+                    "tencent_owned": False,
+                    "ollama_owned": False,
+                }),
+                encoding="utf-8",
+            )
+            runtime = TencentRuntime()
+            def ports(host, port):
+                if port == 11434:
+                    return True
+                return port == 8420
+            with patch.object(runtime, "_port_open", side_effect=ports):
+                with self.assertRaisesRegex(RuntimeError, "does not own that stack"):
+                    runtime.recover(str(home))
+
     def test_start_records_selected_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / ".hermes"
