@@ -32,9 +32,12 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23"]
 
+# Hermes' general plugin loader expects the entry point to resolve to a module
+# exposing register(ctx), not directly to the register function.
 [project.entry-points."hermes_agent.plugins"]
-jarvis = "jarvis_memory.hermes_plugin:register"
+jarvis = "jarvis_memory.hermes_plugin"
 
+# Memory providers have a dedicated loader that accepts a factory/callable.
 [project.entry-points."hermes_agent.memory_providers"]
 jarvis = "jarvis_memory.hermes_memory_provider:provider_factory"
 
