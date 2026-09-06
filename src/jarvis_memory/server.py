@@ -411,7 +411,8 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
 
         elif name == "jarvis_get_pending_workflows":
             workflows = []
-            all_wfs = dict(autonomous_executor.active_workflows)
+            with autonomous_executor._lock:
+                all_wfs = dict(autonomous_executor.active_workflows)
             if autonomous_executor.store:
                 all_wfs.update(autonomous_executor.store.load_all())
             for wid, wstate in all_wfs.items():

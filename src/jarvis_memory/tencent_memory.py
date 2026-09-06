@@ -30,6 +30,7 @@ silently, but better to catch it once at setup than mid-run.
 import logging
 import os
 import time
+import threading
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -70,6 +71,7 @@ class TencentMemoryClient:
         self.api_key = api_key or CONFIG.gateway_api_key or None
         self._client = httpx.Client(timeout=timeout)
         self._consecutive_failures = 0
+        self._circuit_lock = threading.Lock()
         self._circuit_opened_at: Optional[float] = None
 
     def _headers(self) -> Dict[str, str]:
@@ -79,27 +81,31 @@ class TencentMemoryClient:
         return headers
 
     def _check_circuit(self):
-        if self._circuit_opened_at is None:
-            return
-        elapsed = time.monotonic() - self._circuit_opened_at
-        if elapsed < self.COOLDOWN_SECONDS:
-            raise CircuitBreakerOpen(
-                f"Circuit open — {self.COOLDOWN_SECONDS - elapsed:.0f}s remaining in cooldown"
-            )
-        # Cooldown elapsed: allow a trial request through (half-open).
-        # We do NOT reset _consecutive_failures yet — if this trial fails,
-        # _record_failure will immediately trip the circuit open again.
-        self._circuit_opened_at = None
+        with self._circuit_lock:
+            if self._circuit_opened_at is None:
+                return
+            elapsed = time.monotonic() - self._circuit_opened_at
+            if elapsed < self.COOLDOWN_SECONDS:
+                raise CircuitBreakerOpen(
+                    f"Circuit open — {self.COOLDOWN_SECONDS - elapsed:.0f}s remaining in cooldown"
+                )
+            # Cooldown elapsed: allow a trial request through (half-open).
+            # We do NOT reset _consecutive_failures yet — if this trial fails,
+            # _record_failure will immediately trip the circuit open again.
+            self._circuit_opened_at = None
 
     def _record_success(self):
-        self._consecutive_failures = 0
-        self._circuit_opened_at = None
+        with self._circuit_lock:
+            self._consecutive_failures = 0
+            self._circuit_lock = threading.Lock()
+            self._circuit_opened_at = None
 
     def _record_failure(self):
-        self._consecutive_failures += 1
-        if self._consecutive_failures >= self.FAILURE_THRESHOLD:
-            self._circuit_opened_at = time.monotonic()
-            logger.error("Circuit breaker OPEN after %d consecutive Gateway failures", self._consecutive_failures)
+        with self._circuit_lock:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self.FAILURE_THRESHOLD:
+                self._circuit_opened_at = time.monotonic()
+                logger.error("Circuit breaker OPEN after %d consecutive Gateway failures", self._consecutive_failures)
 
     def _request(self, method: str, path: str, json_body: Optional[Dict] = None) -> Dict[str, Any]:
         self._check_circuit()
@@ -111,7 +117,10 @@ class TencentMemoryClient:
                 raise MemoryGatewayError(f"{method} {path} -> {resp.status_code}: {resp.text[:500]}")
             self._record_success()
             if resp.content:
-                return resp.json()
+                try:
+                    return resp.json()
+                except Exception:
+                    return {"raw_text": resp.text}
             return {}
         except httpx.HTTPError as e:
             self._record_failure()
