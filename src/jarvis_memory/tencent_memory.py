@@ -86,9 +86,10 @@ class TencentMemoryClient:
             raise CircuitBreakerOpen(
                 f"Circuit open — {self.COOLDOWN_SECONDS - elapsed:.0f}s remaining in cooldown"
             )
-        # Cooldown elapsed: allow a trial request through, reset bookkeeping.
+        # Cooldown elapsed: allow a trial request through (half-open).
+        # We do NOT reset _consecutive_failures yet — if this trial fails,
+        # _record_failure will immediately trip the circuit open again.
         self._circuit_opened_at = None
-        self._consecutive_failures = 0
 
     def _record_success(self):
         self._consecutive_failures = 0

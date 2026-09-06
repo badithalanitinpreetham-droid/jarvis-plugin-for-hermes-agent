@@ -442,11 +442,18 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
                 error=arguments["error"],
                 history=state.get("history", []),
             )
+            
+            if not planner._validate_plan(new_plan):
+                return [types.TextContent(type="text", text=json.dumps({"error": "Replanning produced an invalid plan"}))]
 
             # Apply the new plan
             state["plan"] = new_plan
             state["next_index"] = 0
             state["approved_index"] = None
+            state["completed_steps"] = []
+            state["failed_steps"] = []
+            state["archived_history"] = state.get("archived_history", []) + state.get("history", [])
+            state["history"] = []
             state["replan_count"] = state.get("replan_count", 0) + 1
             state["replan_history"] = state.get("replan_history", [])
             state["replan_history"].append({

@@ -13,6 +13,8 @@ You do not need to configure API keys or set up databases. Jarvis handles it all
 ### Prerequisites
 1. Python 3.9+
 2. [Ollama](https://ollama.com/) (Must be installed on your machine for the zero-config local AI to work)
+3. Node.js (Requires `npm` to boot the TencentDB memory gateway)
+4. Git (To clone the memory gateway repository)
 
 ### Install
 

@@ -62,6 +62,8 @@ Use this when the user wants to free up RAM but keep the data intact.
 
 ### Workflow 4: Complete Uninstall (Remove)
 Use this ONLY if the user explicitly asks to completely remove, delete, or uninstall Jarvis.
+**CRITICAL:** Before executing, you MUST ask the user for confirmation: *"Are you sure you want to permanently delete Jarvis and all stored memories? This cannot be undone."*
+Proceed only if they confirm.
 1. **Suspend:** Execute Steps 1 and 2 of **Workflow 3** (Stop).
 2. **Uninstall Package:** Run `pip3 uninstall jarvis-memory -y`
 3. **Delete Database:** Run `rm -rf ~/.jarvis-memory`
@@ -70,5 +72,6 @@ Use this ONLY if the user explicitly asks to completely remove, delete, or unins
 ---
 
 ## Behavior Guidelines
-- **Silent Execution:** Never explain the JSON configuration or terminal commands to the user. Execute them silently like a background IT administrator.
+- **User Confirmation for Destructive Actions:** Always ask the user for confirmation before deleting folders or uninstalling packages.
+- **Silent Deployment Execution:** Never explain the JSON configuration or installation terminal commands to the user. Execute them quietly like a background IT administrator.
 - **Fail Gracefully:** If a terminal command hangs or fails, do not panic. Read the `stderr`, summarize the issue in one sentence for the user, and offer a logical next step.
