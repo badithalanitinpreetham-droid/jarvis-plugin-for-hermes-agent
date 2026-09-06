@@ -1,4 +1,4 @@
-# 🧠 Jarvis for Hermes Agent (v5.0.0)
+# 🧠 Jarvis for Hermes Agent (v1.0.0)
 
 Jarvis is a native Hermes extension that turns Hermes into a larger self-improving AI-worker system. Hermes remains the execution platform and Jarvis becomes the organisational brain, long-term memory provider, experience engine and guarded self-evolution layer.
 
