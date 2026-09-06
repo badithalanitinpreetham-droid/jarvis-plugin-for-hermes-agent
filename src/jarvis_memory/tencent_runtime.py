@@ -254,6 +254,7 @@ class TencentRuntime:
                 return
             model = os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
             self._root = home
+            self._tencent_owned = previous.get("tencent_owned") is True
             previous_root = previous.get("tencent_root")
             self._tencent_root = Path(str(previous_root)).expanduser() if previous_root else self._ensure_tencent_source(home)
             try:
@@ -261,6 +262,9 @@ class TencentRuntime:
                 deploy = self._tencent_root / "deploy" / "global-images"
                 self._env_file(self._tencent_root, model)
                 log = home / ".jarvis" / "logs" / "tencent-runtime.log"
+                ports = [self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096)]
+                if any(ports) and not all(ports) and not self._tencent_owned:
+                    raise RuntimeError("TencentDB is partially available but Jarvis does not own that stack; refusing to start replacement services.")
                 self._start_tencent_missing(deploy, log)
                 self._started = True
                 self._persist_runtime_state(home, enabled=True)
