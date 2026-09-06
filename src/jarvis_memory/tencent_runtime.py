@@ -105,7 +105,7 @@ class TencentRuntime:
             "MEMORY_LLM_API_KEY=ollama",
             f"MEMORY_LLM_MODEL={model}",
             "MEMORY_LLM_PROTOCOL=openai",
-            "PROXY_UPSTREAM_URL=" + DEFAULT_OLLAMA_URL,
+            f"PROXY_UPSTREAM_URL={DEFAULT_OLLAMA_URL}",
             "PROXY_UPSTREAM_API_KEY=ollama",
             f"PROXY_UPSTREAM_MODEL={model}",
             "MEMORY_CORE_PORT=8420",
@@ -185,8 +185,9 @@ class TencentRuntime:
         log.parent.mkdir(parents=True, exist_ok=True)
         try:
             handle = log.open("ab")
-            self._ollama_process = subprocess.Popen([exe, "serve"], stdout=handle,
-                                                     stderr=subprocess.STDOUT, start_new_session=True)
+            self._ollama_process = subprocess.Popen(
+                [exe, "serve"], stdout=handle, stderr=subprocess.STDOUT, start_new_session=True
+            )
             handle.close()
             self._ollama_owned = True
         except (FileNotFoundError, OSError) as exc:
@@ -227,6 +228,17 @@ class TencentRuntime:
         self._tencent_owned = False
         self._started = False
 
+    def _start_tencent_missing(self, deploy: Path, log: Path) -> None:
+        services = (
+            (8420, "start-memory-core.sh"),
+            (8125, "start-memory-hub.sh"),
+            (8096, "start-proxy.sh"),
+        )
+        for port, script in services:
+            if not self._port_open("127.0.0.1", port):
+                self._run(["bash", script], cwd=deploy, timeout=300, log_file=log)
+                self._tencent_owned = True
+
     def start(self, hermes_home: Optional[str] = None, *, force: bool = False) -> None:
         with self._lock:
             if self._started:
@@ -249,20 +261,34 @@ class TencentRuntime:
                 deploy = self._tencent_root / "deploy" / "global-images"
                 self._env_file(self._tencent_root, model)
                 log = home / ".jarvis" / "logs" / "tencent-runtime.log"
-                services_up = all(self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096))
-                if services_up:
-                    self._tencent_owned = previous.get("tencent_owned") is True
-                else:
-                    for script in ("start-memory-core.sh", "start-memory-hub.sh", "start-proxy.sh"):
-                        self._run(["bash", script], cwd=deploy, timeout=300, log_file=log)
-                        # Once the first Tencent component has started, the whole stack is
-                        # considered Jarvis-owned for rollback, even if a later component fails.
-                        self._tencent_owned = True
+                self._start_tencent_missing(deploy, log)
                 self._started = True
                 self._persist_runtime_state(home, enabled=True)
             except Exception:
                 self._rollback_start(home)
                 raise
+
+    def recover(self, hermes_home: Optional[str] = None) -> bool:
+        """Recover enabled Jarvis-owned services without claiming external Ollama."""
+        with self._lock:
+            home = self._home(hermes_home)
+            state = self._load_state(home)
+            if state.get("enabled") is False:
+                return False
+            if not self._port_open("127.0.0.1", 11434) and state.get("ollama_owned") is not True:
+                raise RuntimeError("Ollama is unavailable, but Jarvis does not own it; refusing to start a replacement.")
+            model = os.environ.get("JARVIS_OLLAMA_MODEL", str(state.get("ollama_model") or DEFAULT_OLLAMA_MODEL))
+            self._root = home
+            tencent_root_value = state.get("tencent_root")
+            self._tencent_root = Path(str(tencent_root_value)).expanduser() if tencent_root_value else self._ensure_tencent_source(home)
+            self._start_ollama(home, model, state)
+            deploy = self._tencent_root / "deploy" / "global-images"
+            self._env_file(self._tencent_root, model)
+            log = home / ".jarvis" / "logs" / "tencent-runtime.log"
+            self._start_tencent_missing(deploy, log)
+            self._started = True
+            self._persist_runtime_state(home, enabled=True)
+            return True
 
     def _stop_tencent(self, deploy: Path, log: Path) -> None:
         script = deploy / "stop-all.sh"
