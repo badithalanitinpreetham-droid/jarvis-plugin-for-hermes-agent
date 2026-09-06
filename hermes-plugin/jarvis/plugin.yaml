@@ -1,5 +1,5 @@
 name: jarvis
-version: 5.0.0
+version: 1.0
 description: Jarvis intelligence, organisational memory, workforce routing, experience learning and self-evolution for Hermes Agent
 provides_hooks:
   - on_session_start
