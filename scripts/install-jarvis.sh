@@ -18,16 +18,65 @@ if command -v hermes >/dev/null 2>&1; then
   hermes config set memory.provider jarvis >/dev/null 2>&1 || true
 fi
 
+# Hermes plugins expose plugin-scoped CLI commands (`hermes jarvis start`).
+# Install a tiny user-level compatibility front-end so the requested command
+# shape (`hermes start jarvis` / `hermes stop jarvis`) works without modifying
+# Hermes itself or duplicating Jarvis lifecycle logic.
+SHIM_DIR="$HOME/.local/bin"
+SHIM_PATH="$SHIM_DIR/hermes"
+mkdir -p "$SHIM_DIR"
+cp "$ROOT/scripts/hermes-jarvis-shim.sh" "$SHIM_PATH"
+chmod +x "$SHIM_PATH"
+
+PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+add_path_block() {
+  local rc_file="$1"
+  [[ -f "$rc_file" ]] || touch "$rc_file"
+  if ! grep -Fq '# >>> jarvis-hermes-shim >>>' "$rc_file" 2>/dev/null; then
+    cat >> "$rc_file" <<'EOF'
+
+# >>> jarvis-hermes-shim >>>
+export PATH="$HOME/.local/bin:$PATH"
+# <<< jarvis-hermes-shim <<<
+EOF
+  fi
+}
+
+# zsh is the default shell on modern macOS; bash is covered for users who
+# explicitly use it. Existing shells are not modified in-place; open a new
+# shell (or source the relevant rc file) after installation.
+case "${SHELL:-}" in
+  */zsh) add_path_block "$HOME/.zshrc" ;;
+  */bash) add_path_block "$HOME/.bashrc" ;;
+  *)
+    add_path_block "$HOME/.zshrc"
+    add_path_block "$HOME/.bashrc"
+    ;;
+esac
+
+# Ensure the current installer process can verify the native plugin path even
+# before the user opens a new shell.
+export PATH="$SHIM_DIR:$PATH"
+
+if command -v hermes >/dev/null 2>&1; then
+  hermes plugins enable jarvis >/dev/null 2>&1 || true
+  hermes config set memory.provider jarvis >/dev/null 2>&1 || true
+fi
+
 echo
 cat <<'EOF'
 Jarvis is installed in the current Python environment.
 
-Primary lifecycle:
+Primary native Hermes lifecycle:
+  hermes jarvis start
+  hermes jarvis stop
+
+Requested compatibility lifecycle:
   hermes start jarvis
   hermes stop jarvis
 
-Normal Hermes usage:
-  hermes
+The compatibility form is a thin user-level wrapper. All other Hermes
+commands are passed unchanged to the real Hermes executable.
 
 When Jarvis starts, it automatically:
   1. Reuses or provisions the pinned TencentDB Agent Memory source.
@@ -43,7 +92,7 @@ Default Jarvis/Tencent memory model:
 The model is used by Jarvis/TencentDB memory services and does not replace
 Hermes' primary AIAgent model/provider.
 
-Model files remain installed in Ollama after `hermes stop jarvis`.
+Model files remain installed in Ollama after Jarvis is stopped.
 Jarvis stops only the Ollama server process that Jarvis itself started.
 
 TencentDB source is kept under:
@@ -51,4 +100,7 @@ TencentDB source is kept under:
 
 macOS launchd service:
   ~/Library/LaunchAgents/com.jarvis.hermes-runtime.plist
+
+The compatibility shim is installed at:
+  ~/.local/bin/hermes
 EOF
