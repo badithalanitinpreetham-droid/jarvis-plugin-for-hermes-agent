@@ -69,21 +69,38 @@ cd jarvis-plugin-for-hermes-agent
 ./scripts/install-jarvis.sh
 ```
 
-When the `hermes` command is available, the source installer attempts to enable Jarvis and select `memory.provider=jarvis`.
+When the `hermes` command is available, the source installer enables Jarvis and selects `memory.provider=jarvis` on a best-effort basis. It also installs a user-level command shim for the requested `hermes start jarvis` / `hermes stop jarvis` syntax.
 
 ## Start and stop Jarvis
 
-The primary operator commands are:
+Hermes' plugin API is plugin-scoped, so the **native command form** is:
+
+```bash
+hermes jarvis start
+hermes jarvis stop
+```
+
+The source installer additionally provides the requested compatibility form:
 
 ```bash
 hermes start jarvis
 hermes stop jarvis
 ```
 
-`hermes start jarvis` is the master switch for the Jarvis runtime:
+The compatibility form is a thin front-end at `~/.local/bin/hermes`. It translates only these two Jarvis lifecycle commands into the native plugin form and passes every other Hermes command unchanged to the real Hermes executable. This avoids patching Hermes core and keeps one implementation of the Jarvis lifecycle.
+
+`hermes start jarvis` is therefore a convenience compatibility entry point, while `hermes jarvis start` is the direct Hermes-plugin command.
+
+The lifecycle flow is:
 
 ```text
 hermes start jarvis
+        ↓
+compatibility shim
+        ↓
+hermes jarvis start
+        ↓
+Jarvis plugin runtime
         ↓
 reuse or provision pinned TencentDB source
         ↓
@@ -178,95 +195,73 @@ health checks
   ├── memory-core :8420
   ├── memory-hub :8125
   └── proxy :8096
-      ↓
-if unhealthy → Jarvis runtime recovery
 ```
 
-`launchd` also restarts the supervisor itself if the supervisor process crashes.
+Only Jarvis-owned processes are eligible for recovery. The ownership state is persisted so a pre-existing Ollama server is not killed or silently replaced.
 
-### Ownership and recovery rules
+## Status
 
-The supervisor must never take ownership of an unrelated Ollama process. If Ollama was already running when Jarvis started, Jarvis records that it does not own that server and does not kill it during stop/recovery.
-
-If Jarvis itself started Ollama and that process later dies, the supervisor can restart it and re-establish the required TencentDB connection.
-
-If one or more TencentDB services become unreachable, the supervisor asks Jarvis' runtime to recover the stack using Tencent's supported startup scripts. Persistent TencentDB volumes and Jarvis experience data are preserved.
-
-### Explicit stop remains authoritative
+Use the native plugin command:
 
 ```bash
-hermes stop jarvis
+hermes jarvis status
 ```
 
-unloads the `launchd` service, disables the persisted runtime state, and then stops only Jarvis-owned services. This prevents the supervisor from immediately bringing the stack back after an intentional shutdown.
-
-### Manual watchdog status
-
-The supervisor can be inspected on macOS through its native label:
-
-```bash
-launchctl print gui/$(id -u)/com.jarvis.hermes-runtime
-```
-
-Jarvis also exposes `/jarvis status` and the native `jarvis_runtime` status tool.
-
-### Important macOS limitation
-
-The watchdog is deliberately a **user-level** launch agent. It supervises the Jarvis runtime while the user session is active. It is not a system-wide root daemon and does not replace Hermes' own watchdog/lifecycle mechanisms.
-
-## In-Hermes controls
+The slash command is also available inside Hermes:
 
 ```text
 /jarvis status
-/jarvis start
-/jarvis stop
 ```
 
-Native tools:
-
-```text
-jarvis_orchestrate
-jarvis_record_outcome
-jarvis_runtime
-```
+The runtime reports reachability and ownership for Ollama and the TencentDB services.
 
 ## Runtime opt-out
 
-To prevent automatic local service startup during normal Hermes hooks:
+To keep Jarvis installed but stop its local services:
 
 ```bash
-export JARVIS_TENCENT_AUTOSTART=0
+hermes jarvis stop
 ```
 
-The explicit `hermes start jarvis` command remains the operator control and forces the runtime on.
-
-On macOS, using `hermes start jarvis` still enables the launchd supervisor because that is an explicit operator action.
-
-## Plug out
-
-Non-destructive removal:
+The compatibility equivalent is:
 
 ```bash
 hermes stop jarvis
-hermes config set memory.provider ""
-hermes plugins disable jarvis
-hermes plugins remove jarvis
 ```
 
-Persistent Jarvis experience data and TencentDB data volumes are intentionally retained. Do not delete those stores unless the user explicitly requests destructive data removal.
+Stopping Jarvis does not stop Hermes itself. It also does not delete Ollama model files, TencentDB data volumes, or Jarvis experience data.
 
-## Memory layers
+## Removal
 
-```text
-Hermes Bot/profile memory
-          +
-Jarvis experience / organisation memory
-          +
-Tencent MemoryCore semantic memory
+Use the repository removal script:
+
+```bash
+./scripts/remove-jarvis.sh
 ```
 
-TencentDB remains an internal Jarvis backend. Hermes users interact with the Jarvis plugin/provider, not a separate Tencent extension.
+The removal script first attempts to stop Jarvis and unload its launchd supervisor, clears the selected Jarvis memory provider, disables the plugin, uninstalls the Python package, and removes the Jarvis compatibility shim. Persistent Ollama models, TencentDB volumes, and Jarvis experience data are deliberately retained.
 
-## Safety
+## Verification
 
-Recalled memory is untrusted evidence, not executable instructions. Credentials/private keys are not intentionally captured into experience memory. Jarvis does not bypass Hermes' permission, tool, or policy boundaries.
+Run:
+
+```bash
+hermes plugins doctor jarvis --ci
+hermes plugins list
+hermes jarvis status
+```
+
+Then exercise the lifecycle:
+
+```bash
+hermes jarvis start
+hermes jarvis status
+hermes jarvis stop
+```
+
+After a fresh shell (so `~/.local/bin` is on PATH), also verify the requested compatibility form:
+
+```bash
+hermes start jarvis
+hermes stop jarvis
+```
