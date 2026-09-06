@@ -11,12 +11,20 @@ class FakeContext:
     def __init__(self):
         self.hooks = []
         self.tools = []
+        self.commands = []
+        self.cli_commands = []
 
     def register_hook(self, name, callback):
         self.hooks.append((name, callback))
 
     def register_tool(self, **kwargs):
         self.tools.append(kwargs)
+
+    def register_command(self, name, **kwargs):
+        self.commands.append((name, kwargs))
+
+    def register_cli_command(self, **kwargs):
+        self.cli_commands.append(kwargs)
 
 
 class TestHermesNativeIntegration(unittest.TestCase):
@@ -38,6 +46,12 @@ class TestHermesNativeIntegration(unittest.TestCase):
         self.assertIn("post_tool_call", hook_names)
         self.assertIn("subagent_stop", hook_names)
         self.assertEqual({tool["toolset"] for tool in ctx.tools}, {"jarvis"})
+        self.assertEqual({name for name, _ in ctx.commands}, {"jarvis"})
+        self.assertEqual({item["name"] for item in ctx.cli_commands}, {"start", "stop"})
+
+        start = next(item for item in ctx.cli_commands if item["name"] == "start")
+        parser = __import__("argparse").ArgumentParser()
+        start["setup_fn"](parser.add_subparsers(dest="command").add_parser("jarvis"))
 
     def test_pre_llm_hook_returns_bounded_context_for_complex_goal(self):
         with tempfile.TemporaryDirectory() as tmp:
