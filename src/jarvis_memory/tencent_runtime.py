@@ -99,9 +99,7 @@ class TencentRuntime:
     def _clear_state(cls, home: Path) -> None:
         try:
             cls._state_path(home).unlink()
-        except FileNotFoundError:
-            pass
-        except OSError:
+        except (FileNotFoundError, OSError):
             pass
 
     def _ensure_tencent_source(self, home: Path) -> Path:
@@ -175,37 +173,42 @@ class TencentRuntime:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if self._port_open("127.0.0.1", 11434):
-                self._persist_runtime_state(home)
                 return
             if self._ollama_process.poll() is not None:
                 raise RuntimeError("Ollama exited while Jarvis was starting it.")
             time.sleep(0.5)
         raise RuntimeError("Ollama did not become ready on 127.0.0.1:11434 within 30 seconds.")
 
-    def _persist_runtime_state(self, home: Path) -> None:
+    def _persist_runtime_state(self, home: Path, *, enabled: bool = True) -> None:
         state: dict[str, object] = {
             "version": 1,
+            "enabled": enabled,
             "hermes_home": str(home),
             "tencent_root": str(self._tencent_root) if self._tencent_root else "",
-            "tencent_owned": self._tencent_owned,
-            "ollama_owned": self._ollama_owned,
-            "ollama_pid": self._ollama_process.pid if self._ollama_process is not None else None,
-            "ollama_pgid": self._ollama_process.pid if self._ollama_process is not None else None,
+            "tencent_owned": self._tencent_owned if enabled else False,
+            "ollama_owned": self._ollama_owned if enabled else False,
+            "ollama_pid": self._ollama_process.pid if enabled and self._ollama_process is not None else None,
+            "ollama_pgid": self._ollama_process.pid if enabled and self._ollama_process is not None else None,
         }
         self._save_state(home, state)
 
-    def start(self, hermes_home: Optional[str] = None) -> None:
+    def start(self, hermes_home: Optional[str] = None, *, force: bool = False) -> None:
         with self._lock:
             if self._started:
                 return
-            if os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower() in {"0", "false", "no"}:
+            if os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower() in {"0", "false", "no"} and not force:
                 self._started = True
                 return
             home = self._home(hermes_home)
-            model = os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
             previous = self._load_state(home)
+            if previous.get("enabled") is False and not force:
+                self._root = home
+                self._started = True
+                return
+            model = os.environ.get("JARVIS_OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL)
             self._root = home
-            self._tencent_root = Path(str(previous.get("tencent_root") or "")).expanduser() if previous.get("tencent_root") else None
+            previous_root = previous.get("tencent_root")
+            self._tencent_root = Path(str(previous_root)).expanduser() if previous_root else None
             if self._tencent_root is None or not self._tencent_root.exists():
                 self._tencent_root = self._ensure_tencent_source(home)
 
@@ -227,9 +230,9 @@ class TencentRuntime:
                 self._tencent_owned = False
 
             self._started = True
-            self._persist_runtime_state(home)
+            self._persist_runtime_state(home, enabled=True)
 
-    def stop(self, hermes_home: Optional[str] = None) -> None:
+    def stop(self, hermes_home: Optional[str] = None, *, disable: bool = False) -> None:
         with self._lock:
             home = self._root or self._home(hermes_home)
             state = self._load_state(home)
@@ -283,14 +286,17 @@ class TencentRuntime:
             self._started = False
             self._ollama_owned = False
             self._tencent_owned = False
-            self._root = None
-            self._tencent_root = None
-            self._clear_state(home)
+            self._root = home
+            self._tencent_root = tencent_root
+            self._persist_runtime_state(home, enabled=not disable)
+            if not disable and not self._tencent_root:
+                self._clear_state(home)
 
     def status(self, hermes_home: Optional[str] = None) -> dict[str, object]:
         home = self._root or self._home(hermes_home)
         state = self._load_state(home)
         return {
+            "enabled": state.get("enabled", True),
             "started": self._started,
             "ollama_reachable": self._port_open("127.0.0.1", 11434),
             "ollama_owned_by_jarvis": bool(state.get("ollama_owned") or self._ollama_owned),
