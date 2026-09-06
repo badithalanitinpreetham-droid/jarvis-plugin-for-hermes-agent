@@ -30,7 +30,7 @@ class OSAssistant:
         try:
             cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory()
-            disk = psutil.disk_usage('/')
+            disk = psutil.disk_usage(os.path.abspath(os.sep))
             
             # Try to get battery on Mac
             battery_percent = "Unknown"

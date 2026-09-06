@@ -323,6 +323,17 @@ async def list_tools() -> List[types.Tool]:
             }
         ),
         types.Tool(
+            name="jarvis_mark_tool_fixed",
+            description="Manually clear the broken status of a tool after it has been repaired.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "tool_name": {"type": "string", "description": "The name of the fixed tool"}
+                },
+                "required": ["tool_name"]
+            }
+        ),
+        types.Tool(
             name="jarvis_check_stalled",
             description="Find workflows where the current step has been running longer than the timeout without a result being reported. Returns a list of stalled workflows.",
             inputSchema={
@@ -535,6 +546,11 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
         elif name == "jarvis_mark_tool_broken":
             _workflow_store.mark_tool_broken(arguments["tool_name"], arguments["reason"])
             result = {"status": "success", "message": f"Tool '{arguments['tool_name']}' flagged as broken. Next plan using it will trigger an auto-repair phase."}
+            return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
+
+        elif name == "jarvis_mark_tool_fixed":
+            _workflow_store.mark_tool_fixed(arguments["tool_name"])
+            result = {"status": "success", "message": f"Tool '{arguments['tool_name']}' is now marked as fixed and will be used normally."}
             return [types.TextContent(type="text", text=json.dumps(result, indent=2))]
 
         # --- OS Assistant & Telemetry ---

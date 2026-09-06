@@ -49,9 +49,11 @@ class WorkflowProgressRenderer:
             
             node_label = f"{step_id}. {action}\\n{conf_str} | {risk_str}"
             
-            node_id = f"S{step_id}"
+            safe_step_id = str(step_id).replace("-", "M")
+            node_id = f"S{safe_step_id}"
             if i > 0:
-                prev_id = f"S{steps[i-1].get('id', i)}"
+                prev_safe = str(steps[i-1].get('id', i)).replace("-", "M")
+                prev_id = f"S{prev_safe}"
                 lines.append(f"    {prev_id} --> {node_id}[\"{node_label}\"]")
             else:
                 lines.append(f"    {node_id}[\"{node_label}\"]")
@@ -153,12 +155,14 @@ class WorkflowProgressRenderer:
         for i, step in enumerate(steps):
             step_id = step.get("id", i + 1)
             action = step.get("action", f"Step {step_id}")
-            node_id = f"S{step_id}"
+            safe_step_id = str(step_id).replace("-", "M")
+            node_id = f"S{safe_step_id}"
             
             node_label = f"{step_id}. {action}"
             
             if i > 0:
-                prev_id = f"S{steps[i-1].get('id', i)}"
+                prev_safe = str(steps[i-1].get('id', i)).replace("-", "M")
+                prev_id = f"S{prev_safe}"
                 lines.append(f"    {prev_id} --> {node_id}[\"{node_label}\"]")
             else:
                 lines.append(f"    {node_id}[\"{node_label}\"]")
