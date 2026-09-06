@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 import time
 from typing import Any, Dict, Iterable, List, Mapping
 
@@ -111,7 +112,7 @@ class OrganisationPlanner:
             capabilities = raw.get("capabilities", raw.get("skills", []))
             if isinstance(capabilities, str):
                 capabilities = [capabilities]
-            if not isinstance(capabilities, Iterable):
+            if not isinstance(capabilities, Iterable) or isinstance(capabilities, (bytes, bytearray, Mapping)):
                 capabilities = []
             roster.append({
                 "id": bot_id,
@@ -123,7 +124,21 @@ class OrganisationPlanner:
         return roster
 
     @staticmethod
-    def _select_bot(role: str, capabilities: Iterable[str], roster: List[Dict[str, Any]], used: set[str]) -> tuple[str | None, str]:
+    def _contains_term(text: str, term: str) -> bool:
+        pattern = r"(?<![\w-])" + re.escape(term.lower()) + r"(?![\w-])"
+        return re.search(pattern, text) is not None
+
+    @classmethod
+    def _role_matches(cls, text: str, keywords: Iterable[str]) -> bool:
+        return any(cls._contains_term(text, keyword) for keyword in keywords)
+
+    @staticmethod
+    def _description_overlap(required: set[str], description: str) -> int:
+        tokens = set(re.findall(r"[a-z0-9_+-]+", description.lower()))
+        return len(required & tokens)
+
+    @classmethod
+    def _select_bot(cls, role: str, capabilities: Iterable[str], roster: List[Dict[str, Any]], used: set[str]) -> tuple[str | None, str]:
         required = {role.lower(), *(item.lower() for item in capabilities)}
         best_id: str | None = None
         best_score = 0
@@ -135,12 +150,11 @@ class OrganisationPlanner:
             if bot.get("role") == role.lower():
                 score += 8
             score += 3 * len(required & bot.get("capabilities", set()))
-            description = bot.get("description", "")
-            score += 2 * sum(1 for term in required if term in description)
+            score += 2 * cls._description_overlap(required, bot.get("description", ""))
             if score > best_score:
                 best_id, best_score = bot_id, score
         if best_id:
-            return best_id, "Existing Hermes Bot matched by role/capability overlap."
+            return best_id, "Existing Hermes Bot matched by role/capability metadata."
         return None, "No suitable permanent Hermes Bot is currently known for this role."
 
     def design(
@@ -161,7 +175,7 @@ class OrganisationPlanner:
         assignments: List[AgentAssignment] = []
 
         for role, keywords, purpose, capabilities in self._ROLE_RULES:
-            if any(keyword in text for keyword in keywords):
+            if self._role_matches(text, keywords):
                 selected_bot, reason = self._select_bot(role, capabilities, roster, used_bots)
                 if selected_bot:
                     used_bots.add(selected_bot)
@@ -194,7 +208,6 @@ class OrganisationPlanner:
             bool(unfilled_roles) and len(assignments) > 1,
         ))
         complex = complexity_score >= 2
-
         temporary_reasons: List[str] = []
         if unfilled_roles:
             temporary_reasons.append(
