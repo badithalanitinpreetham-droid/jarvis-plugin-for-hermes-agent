@@ -67,6 +67,7 @@ class AutonomousExecutor:
         self.step_timeout = self.config.get("step_timeout", CONFIG.step_timeout)
         self.store = store or WorkflowStore(CONFIG.workflow_db_path)
         self.planner = planner  # Optional WorkflowPlanner for auto-replan
+        self._lock = threading.RLock()
 
         # Warm cache from disk so an in-flight workflow survives a restart.
         self.active_workflows: Dict[str, Dict] = self.store.load_all()
