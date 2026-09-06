@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 TERMINAL = {"completed", "completed_with_failures", "failed", "cancelled"}
 
+
 class WorkflowStore:
     def __init__(self, db_path: str):
         resolved = os.path.expanduser(db_path)
@@ -20,6 +21,7 @@ class WorkflowStore:
         self._lock = threading.RLock()
         self._conn = sqlite3.connect(resolved, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._init_schema()
 
     @staticmethod
@@ -37,7 +39,6 @@ class WorkflowStore:
             self._conn.execute("""CREATE TABLE IF NOT EXISTS triggers(
                 goal TEXT NOT NULL, profile_id TEXT NOT NULL, interval_seconds INTEGER NOT NULL,
                 last_run TEXT, created_at TEXT NOT NULL)""")
-            # Migrate old databases safely: remove duplicate schedules before the unique index.
             self._conn.execute("""DELETE FROM triggers WHERE rowid NOT IN (
                 SELECT MIN(rowid) FROM triggers GROUP BY goal, profile_id, interval_seconds)""")
             self._conn.execute("""CREATE UNIQUE INDEX IF NOT EXISTS idx_triggers_unique
@@ -47,26 +48,45 @@ class WorkflowStore:
             self._conn.commit()
 
     def save(self, workflow_id: str, state: Dict[str, Any]) -> None:
+        workflow_id = str(workflow_id).strip()
+        if not workflow_id:
+            raise ValueError("workflow_id is required")
+        if not isinstance(state, dict) or not state.get("profile_id") or not state.get("status"):
+            raise ValueError("state requires profile_id and status")
         with self._lock:
+            persisted = dict(state)
+            persisted["workflow_id"] = workflow_id
             self._conn.execute("""INSERT INTO workflows(workflow_id,profile_id,status,state_json,updated_at)
                 VALUES(?,?,?,?,?) ON CONFLICT(workflow_id) DO UPDATE SET profile_id=excluded.profile_id,
                 status=excluded.status,state_json=excluded.state_json,updated_at=excluded.updated_at""",
-                (workflow_id, state["profile_id"], state["status"], json.dumps(state), self._now()))
+                (workflow_id, persisted["profile_id"], persisted["status"], json.dumps(persisted), self._now()))
             self._conn.commit()
 
     def load(self, workflow_id: str) -> Optional[Dict[str, Any]]:
         with self._lock:
-            row = self._conn.execute("SELECT state_json FROM workflows WHERE workflow_id=?", (workflow_id,)).fetchone()
-        return json.loads(row[0]) if row else None
+            row = self._conn.execute("SELECT state_json FROM workflows WHERE workflow_id=?", (str(workflow_id),)).fetchone()
+        if not row:
+            return None
+        try:
+            state = json.loads(row[0])
+        except json.JSONDecodeError:
+            return None
+        if isinstance(state, dict):
+            state.setdefault("workflow_id", str(workflow_id))
+            return state
+        return None
 
     def load_all(self, include_terminal: bool = True) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute("SELECT workflow_id,state_json FROM workflows").fetchall()
-        result = {}
+        result: Dict[str, Dict[str, Any]] = {}
         for wid, raw in rows:
             try:
                 state = json.loads(raw)
+                if not isinstance(state, dict):
+                    continue
                 if include_terminal or state.get("status") not in TERMINAL:
+                    state.setdefault("workflow_id", wid)
                     result[wid] = state
             except json.JSONDecodeError:
                 continue
@@ -74,8 +94,17 @@ class WorkflowStore:
 
     def list_by_status(self, status: str) -> List[Dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute("SELECT state_json FROM workflows WHERE status=?", (status,)).fetchall()
-        return [json.loads(raw) for (raw,) in rows]
+            rows = self._conn.execute("SELECT workflow_id,state_json FROM workflows WHERE status=?", (status,)).fetchall()
+        result = []
+        for wid, raw in rows:
+            try:
+                state = json.loads(raw)
+                if isinstance(state, dict):
+                    state.setdefault("workflow_id", wid)
+                    result.append(state)
+            except json.JSONDecodeError:
+                continue
+        return result
 
     def cleanup_terminal(self, retention_days: int) -> int:
         cutoff = datetime.now(timezone.utc) - timedelta(days=max(1, int(retention_days)))
@@ -91,7 +120,7 @@ class WorkflowStore:
                         dt = dt.replace(tzinfo=timezone.utc)
                     if dt < cutoff:
                         doomed.append((wid,))
-                except ValueError:
+                except (TypeError, ValueError):
                     continue
             if doomed:
                 self._conn.executemany("DELETE FROM workflows WHERE workflow_id=?", doomed)
@@ -99,7 +128,7 @@ class WorkflowStore:
             return len(doomed)
 
     def add_trigger(self, goal: str, profile_id: str, interval_seconds: int) -> int:
-        goal, profile_id, interval_seconds = goal.strip(), profile_id.strip(), int(interval_seconds)
+        goal, profile_id, interval_seconds = str(goal).strip(), str(profile_id).strip(), int(interval_seconds)
         if not goal or not profile_id or interval_seconds <= 0:
             raise ValueError("goal/profile_id are required and interval_seconds must be > 0")
         with self._lock:
@@ -114,7 +143,7 @@ class WorkflowStore:
     def get_triggers(self) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute("SELECT rowid,goal,profile_id,interval_seconds,last_run,created_at FROM triggers ORDER BY rowid").fetchall()
-        return [{"id":r[0],"goal":r[1],"profile_id":r[2],"interval_seconds":r[3],"last_run":r[4],"created_at":r[5]} for r in rows]
+        return [{"id": r[0], "goal": r[1], "profile_id": r[2], "interval_seconds": r[3], "last_run": r[4], "created_at": r[5]} for r in rows]
 
     def update_trigger_last_run(self, trigger_id: int) -> None:
         with self._lock:
@@ -127,15 +156,18 @@ class WorkflowStore:
             self._conn.commit()
 
     def mark_tool_broken(self, tool_name: str, reason: str) -> None:
+        tool_name, reason = str(tool_name).strip(), str(reason).strip()
+        if not tool_name:
+            raise ValueError("tool_name is required")
         with self._lock:
             self._conn.execute("""INSERT INTO broken_tools(tool_name,reason,broken_at) VALUES(?,?,?)
                 ON CONFLICT(tool_name) DO UPDATE SET reason=excluded.reason,broken_at=excluded.broken_at""",
-                (tool_name, reason, self._now()))
+                (tool_name, reason[:2000], self._now()))
             self._conn.commit()
 
     def mark_tool_fixed(self, tool_name: str) -> None:
         with self._lock:
-            self._conn.execute("DELETE FROM broken_tools WHERE tool_name=?", (tool_name,))
+            self._conn.execute("DELETE FROM broken_tools WHERE tool_name=?", (str(tool_name).strip(),))
             self._conn.commit()
 
     def get_broken_tools(self) -> List[str]:
@@ -144,9 +176,12 @@ class WorkflowStore:
 
     def is_dedupe_done(self, dedupe_key: str) -> bool:
         with self._lock:
-            return self._conn.execute("SELECT 1 FROM dedupe_keys WHERE dedupe_key=?", (dedupe_key,)).fetchone() is not None
+            return self._conn.execute("SELECT 1 FROM dedupe_keys WHERE dedupe_key=?", (str(dedupe_key),)).fetchone() is not None
 
     def mark_dedupe_done(self, dedupe_key: str, workflow_id: str, step_id: Any) -> None:
+        dedupe_key, workflow_id = str(dedupe_key).strip(), str(workflow_id).strip()
+        if not dedupe_key or not workflow_id:
+            raise ValueError("dedupe_key and workflow_id are required")
         with self._lock:
             self._conn.execute("""INSERT INTO dedupe_keys(dedupe_key,workflow_id,step_id,completed_at)
                 VALUES(?,?,?,?) ON CONFLICT(dedupe_key) DO NOTHING""",
