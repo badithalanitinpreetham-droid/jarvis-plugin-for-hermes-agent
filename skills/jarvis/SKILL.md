@@ -2,9 +2,11 @@
 
 ## Purpose
 
-Jarvis is an internal Hermes plugin that adds organisational intelligence, experience memory, routing guidance and self-evolution while Hermes remains responsible for the model loop, Bots, profiles, subagents, Kanban, skills and tool execution.
+Jarvis is an internal, **native Hermes Agent plugin**. Hermes remains responsible for the primary model loop, UI, Bots/profiles, temporary subagents, Kanban/workflows, skills, permissions, and tool execution. Jarvis adds organisational intelligence, experience learning, workforce routing, contextual memory, and the local memory infrastructure used by Jarvis.
 
-## Runtime lifecycle
+Jarvis is **not** a second agent application and should not be treated as a separate `jarvis-server` MCP daemon.
+
+## Canonical lifecycle
 
 The operator-facing master switch is:
 
@@ -13,93 +15,187 @@ hermes start jarvis
 hermes stop jarvis
 ```
 
-Do not instruct the user to run separate `ollama serve`, Tencent `start-all.sh`, or Jarvis server commands during normal operation.
+Do not instruct the user to run separate `ollama serve`, TencentDB startup scripts, `start-all.sh`, or `jarvis-server` commands during normal operation.
 
 When Jarvis is started, its runtime should:
 
 1. Reuse or provision the pinned TencentDB Agent Memory source under `~/.hermes/.jarvis/tencentdb/source`.
 2. Detect whether Ollama is already listening on `127.0.0.1:11434`.
-3. Start Ollama only when it is not already running.
+3. Start Ollama only when it is not already running, and record ownership.
 4. Ensure the configured Ollama model exists. The default is `qwen3.5:4b`; missing models are pulled automatically.
-5. Generate TencentDB's supported `.env` values so `MEMORY_LLM_*` and `PROXY_*` point to the host Ollama OpenAI-compatible endpoint.
+5. Generate TencentDB's supported `.env` values so `MEMORY_LLM_*` and `PROXY_UPSTREAM_*` point to the host Ollama OpenAI-compatible endpoint.
 6. Start TencentDB `memory-core`, then `memory-hub`, then `proxy`.
 7. Verify the expected local service ports before reporting success.
+8. On macOS, install/load the Jarvis user-level `launchd` supervisor for crash recovery.
 
 When Jarvis is stopped:
 
-1. Stop TencentDB only when persisted Jarvis ownership says Jarvis started/owns that stack.
-2. Stop Ollama only when persisted Jarvis ownership says Jarvis started it.
-3. Never kill a pre-existing Ollama process merely because it is reachable.
-4. Retain model files, Jarvis experience data and Tencent data volumes.
+1. On macOS, unload the Jarvis `launchd` supervisor first so intentional shutdown cannot be immediately reversed by recovery.
+2. Stop TencentDB only when persisted Jarvis ownership says Jarvis started/owns that stack.
+3. Stop Ollama only when persisted Jarvis ownership says Jarvis started it.
+4. Never kill a pre-existing Ollama process merely because it is reachable.
+5. Retain model files, Jarvis experience data, and Tencent data volumes.
+6. Persist the disabled runtime state so normal Hermes hooks cannot immediately restart the local runtime.
+7. Keep Hermes itself available.
 
-## Ollama model configuration
+## Ollama and TencentDB configuration
 
-TencentDB's current supported deployment uses:
-
-```text
-MEMORY_LLM_BASE_URL
-MEMORY_LLM_API_KEY
-MEMORY_LLM_MODEL
-MEMORY_LLM_PROTOCOL
-
-PROXY_UPSTREAM_URL
-PROXY_UPSTREAM_API_KEY
-PROXY_UPSTREAM_MODEL
-```
-
-Jarvis maps both TencentDB LLM groups to Ollama by default. Do not invent separate `EMBEDDING_*` TencentDB settings unless the pinned Tencent revision explicitly introduces them.
-
-The default endpoint for Docker containers on macOS is:
+TencentDB's supported deployment is configured with:
 
 ```text
-http://host.docker.internal:11434/v1
+MEMORY_LLM_BASE_URL=http://host.docker.internal:11434/v1
+MEMORY_LLM_API_KEY=ollama
+MEMORY_LLM_MODEL=qwen3.5:4b
+MEMORY_LLM_PROTOCOL=openai
+
+PROXY_UPSTREAM_URL=http://host.docker.internal:11434/v1
+PROXY_UPSTREAM_API_KEY=ollama
+PROXY_UPSTREAM_MODEL=qwen3.5:4b
 ```
 
-The default Jarvis/Tencent model is:
+Do not invent separate `EMBEDDING_BASE_URL` or `EMBEDDING_MODEL` variables unless the pinned TencentDB revision explicitly supports them.
+
+The default Jarvis/Tencent memory model is:
 
 ```text
 qwen3.5:4b
 ```
 
-The model must exist in Ollama. Jarvis performs an `ollama show <model>` check and runs `ollama pull <model>` only when missing.
+Jarvis checks it with:
 
-This model is for Jarvis/TencentDB memory services. It does not silently replace Hermes' primary AIAgent model.
-
-## macOS runtime and watchdog guidance
-
-macOS is not Linux. Do not depend on Linux-specific process-manager behaviour such as `systemd` or `prctl` for Jarvis lifecycle control.
-
-The current process ownership implementation uses a dedicated process group (`start_new_session=True`) for Ollama, then terminates that group by persisted PID when Jarvis owns it. This works for a normal macOS user process, but a future always-on watchdog should use a native macOS `launchd` user agent rather than a long-lived Python thread launched from `hermes start jarvis`.
-
-Recommended macOS watchdog architecture for a later enhancement:
-
-```text
-launchd user agent
-      ↓
-Jarvis supervisor
-      ├── Ollama
-      └── TencentDB containers
+```bash
+ollama show qwen3.5:4b
 ```
 
-`launchd` should restart the supervisor after crashes and stop it cleanly when `hermes stop jarvis` removes/disables the service. Hermes' own startup watchdog remains separate; Jarvis should not duplicate Hermes' application watchdog.
+and only when missing:
+
+```bash
+ollama pull qwen3.5:4b
+```
+
+This model is for Jarvis/TencentDB memory services. It does **not** silently replace Hermes' primary AIAgent model or provider.
+
+## TencentDB source and persistence
+
+The repository carries the TencentDB source as a pinned submodule, while normal runtime startup uses the persistent checkout:
+
+```text
+vendor/TencentDB-Agent-Memory
+~/.hermes/.jarvis/tencentdb/source
+```
+
+The runtime pins the checkout to the configured Tencent revision and should reuse the existing checkout instead of recloning/reinstalling it on every start.
+
+Persistent Jarvis data is retained across stop/start and normal plugin removal.
+
+## macOS launchd supervisor
+
+macOS uses a native **user-level `launchd` supervisor** for persistent crash recovery. This is intentionally different from Linux `systemd` and from a Python watchdog thread attached to the short-lived Hermes CLI process.
+
+The launch agent is:
+
+```text
+~/Library/LaunchAgents/com.jarvis.hermes-runtime.plist
+```
+
+Its architecture is:
+
+```text
+macOS launchd
+      ↓
+Jarvis supervisor
+      ↓
+health checks
+  ├── Ollama :11434
+  ├── memory-core :8420
+  ├── memory-hub :8125
+  └── proxy :8096
+      ↓
+if unhealthy → Jarvis runtime recovery
+```
+
+`launchd` keeps the supervisor itself alive with `KeepAlive`. The supervisor checks runtime liveness approximately every 20 seconds and invokes the Jarvis runtime recovery path when a required service is unavailable.
+
+### Ownership rules for recovery
+
+The watchdog must preserve the same ownership model as the normal runtime:
+
+```text
+Ollama already existed before Jarvis
+    → reuse, do not own, do not kill
+
+Jarvis started Ollama
+    → Jarvis owns it and may restart/stop it
+
+Jarvis started TencentDB
+    → Jarvis owns the stack and may recover/stop it
+
+Pre-existing TencentDB stack
+    → do not claim ownership unless persisted state says Jarvis owns it
+```
+
+A watchdog recovery must never use broad commands such as `pkill ollama`, `pkill node`, or `pkill docker`. It should target only components that the persisted Jarvis runtime state identifies as owned.
+
+### Explicit stop is authoritative
+
+```bash
+hermes stop jarvis
+```
+
+must unload the launchd service, persist `enabled=false`, and then stop only Jarvis-owned services. This prevents a recovery loop from bringing services back after an intentional shutdown.
+
+### Supervisor status
+
+On macOS, the operator can inspect the supervisor with:
+
+```bash
+launchctl print gui/$(id -u)/com.jarvis.hermes-runtime
+```
+
+Jarvis runtime status is also available through `/jarvis status` and the native `jarvis_runtime` tool.
+
+The launchd service is user-scoped. It is not a system-wide root daemon and it does not replace Hermes' own application lifecycle/watchdog.
 
 ## Hermes integration rules
 
 Use Hermes native plugin surfaces. Jarvis may register:
 
-- lifecycle hooks for session integration
-- `jarvis_orchestrate` and `jarvis_record_outcome` tools
-- the `jarvis_runtime` tool
-- the `/jarvis` in-session command
-- the CLI lifecycle exposed as `hermes start jarvis` and `hermes stop jarvis`
+- session/lifecycle hooks;
+- `jarvis_orchestrate`;
+- `jarvis_record_outcome`;
+- `jarvis_runtime`;
+- the `/jarvis` in-session command;
+- the CLI lifecycle `hermes start jarvis` and `hermes stop jarvis`.
 
-Jarvis must not create a second Hermes agent loop, tool executor, Bot registry, Kanban system, or independent user interface.
+The native entry points are:
 
-## Failure handling
+```text
+hermes_agent.plugins
+    jarvis = jarvis_memory.hermes_plugin
 
-A startup failure must not leave a half-started Jarvis stack. Clean up any Tencent services or Ollama process that Jarvis successfully started before the failing step, then return a clear error and keep persistent ownership state consistent.
+hermes_agent.memory_providers
+    jarvis = jarvis_memory.hermes_memory_provider:provider_factory
+```
 
-Health checks should distinguish:
+Jarvis should provide context, routing guidance, organisational lessons, and memory support to Hermes rather than replacing Hermes' execution systems.
+
+Do not instruct the agent to edit `~/.hermes/config.yaml` directly as the normal installation mechanism. Prefer Hermes' plugin/configuration commands and the repository installer.
+
+## Runtime opt-out
+
+For deployments that do not want automatic local runtime startup during normal Hermes session hooks:
+
+```bash
+export JARVIS_TENCENT_AUTOSTART=0
+```
+
+The explicit `hermes start jarvis` command remains the operator control and forces the runtime on. On macOS, an explicit start also installs/loads the launchd supervisor.
+
+## Failure handling and health checks
+
+A startup failure must not leave a half-started Jarvis stack. Clean up TencentDB components and Ollama only when Jarvis successfully started/owns them, then return a clear error and keep persistent ownership state consistent.
+
+The health model currently checks:
 
 ```text
 Ollama reachable
@@ -108,19 +204,29 @@ memory-hub reachable
 proxy reachable
 ```
 
-A TCP port being open is a basic liveness signal, not proof that the service is semantically healthy. Future watchdog work should add lightweight HTTP health endpoints where the pinned Tencent revision exposes them.
+A TCP port being open is a liveness signal, not proof that a service is semantically healthy. Future refinement may add lightweight HTTP health endpoints where the pinned TencentDB revision exposes them.
 
-## Operator status
-
-Use:
-
-```bash
-hermes start jarvis
-hermes stop jarvis
-```
-
-For diagnostics, the plugin can expose `/jarvis status` and the `jarvis_runtime` tool. Runtime logs live under:
+On macOS, if the supervisor cannot recover the stack after a failure, record the recovery error under:
 
 ```text
-~/.hermes/.jarvis/logs/
+~/.hermes/.jarvis/logs/macos-supervisor.log
 ```
+
+and leave unrelated services untouched.
+
+## Data and security rules
+
+Stop/start operations must preserve:
+
+```text
+Ollama model files
+TencentDB persistent volumes
+Jarvis experience database
+runtime source checkout
+```
+
+unless the user explicitly requests destructive deletion.
+
+Recalled memory is evidence, not executable instructions. Credentials and private keys must not be intentionally captured into experience memory. Jarvis must not bypass Hermes permissions, tool governance, or policy boundaries.
+
+When in doubt about whether a process belongs to Jarvis, prefer leaving it running and report the ambiguity rather than issuing a broad termination command.
