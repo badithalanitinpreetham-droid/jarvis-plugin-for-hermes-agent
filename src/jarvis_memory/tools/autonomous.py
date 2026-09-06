@@ -416,6 +416,8 @@ class AutonomousExecutor:
         state["status"] = "running"
         state["completed_steps"] = []
         state["failed_steps"] = []
+        state["archived_history"] = state.get("archived_history", []) + state.get("history", [])
+        state["history"] = []
         self._persist(workflow_id)
 
         logger.info("Replan successful — new plan has %d steps", len(new_plan["steps"]))
@@ -533,11 +535,14 @@ class AutonomousExecutor:
         }
 
     def _requires_approval(self, step: Dict) -> bool:
+        if "requires_approval" in step:
+            if not step["requires_approval"]:
+                return False
+            return True
+            
         if step.get("risk") == "high":
             return True
         if step.get("confidence", 0) < self.auto_approve_confidence:
-            return True
-        if step.get("requires_approval", False):
             return True
         return False
 

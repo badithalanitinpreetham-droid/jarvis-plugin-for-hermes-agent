@@ -106,7 +106,7 @@ class JarvisEngine:
         )
         matches = list(role_pattern.finditer(transcript))
 
-        if len(matches) >= 2:
+        if matches:
             for i, match in enumerate(matches):
                 raw_role = match.group(1).lower()
                 if raw_role in ("user", "human"):

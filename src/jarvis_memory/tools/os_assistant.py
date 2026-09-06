@@ -7,6 +7,7 @@ Designed specifically for macOS via osascript/pmset, but degrades gracefully.
 """
 
 import os
+import sys
 import subprocess
 import psutil
 from typing import Dict, Any
@@ -15,6 +16,8 @@ class OSAssistant:
     @staticmethod
     def speak(text: str) -> str:
         """Use the native macOS TTS engine to speak text out loud."""
+        if sys.platform != "darwin":
+            return "Speech synthesis is only supported on macOS."
         try:
             subprocess.run(["say", text], check=True)
             return f"Successfully spoke: {text}"
@@ -25,18 +28,19 @@ class OSAssistant:
     def get_telemetry() -> Dict[str, Any]:
         """Get 'monitor_operative' system vitals."""
         try:
-            cpu = psutil.cpu_percent(interval=0.5)
+            cpu = psutil.cpu_percent(interval=None)
             ram = psutil.virtual_memory()
             disk = psutil.disk_usage('/')
             
             # Try to get battery on Mac
             battery_percent = "Unknown"
-            try:
-                bat_out = subprocess.check_output(["pmset", "-g", "batt"], text=True)
-                if "%" in bat_out:
-                    battery_percent = bat_out.split("%")[0].split()[-1] + "%"
-            except:
-                pass
+            if sys.platform == "darwin":
+                try:
+                    bat_out = subprocess.check_output(["pmset", "-g", "batt"], text=True)
+                    if "%" in bat_out:
+                        battery_percent = bat_out.split("%")[0].split()[-1] + "%"
+                except:
+                    pass
 
             return {
                 "cpu_percent": cpu,
@@ -52,6 +56,8 @@ class OSAssistant:
     @staticmethod
     def control_os(action: str, value: str = "") -> str:
         """Control native macOS functions via AppleScript."""
+        if sys.platform != "darwin":
+            return "OS control actions are only supported on macOS."
         action = action.lower()
         try:
             if action == "set_volume":

@@ -239,18 +239,17 @@ class GatewaySupervisor:
             now = time.monotonic()
 
             with self._profiles_lock:
-                # Evict profiles that haven't been active within TTL
-                expired = [
-                    pid for pid, last_seen in self._profile_last_seen.items()
-                    if (now - last_seen) > self.PROFILE_TTL
-                ]
-                for pid in expired:
-                    del self._profile_last_seen[pid]
-                    logger.debug("Evicted inactive profile from sync: %s", pid)
+                # Evict and sync profiles that have been idle for SYNC_INTERVAL.
+                # If they type again, note_profile_active will re-add them.
+                # This prevents shattering active conversations every 5 minutes.
+                to_sync = []
+                for pid, last_seen in list(self._profile_last_seen.items()):
+                    if (now - last_seen) > self.SYNC_INTERVAL:
+                        to_sync.append(pid)
+                        del self._profile_last_seen[pid]
+                        logger.debug("Profile %s idle, triggering background session_end and evicting", pid)
 
-                active_profiles = list(self._profile_last_seen.keys())
-
-            for profile_id in active_profiles:
+            for profile_id in to_sync:
                 try:
                     self.memory.session_end(profile_id)
                 except Exception as e:
