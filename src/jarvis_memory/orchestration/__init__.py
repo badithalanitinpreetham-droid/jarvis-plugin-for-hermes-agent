@@ -8,7 +8,7 @@ for a user goal and what bounded context should be supplied to workers.
 from .context import build_context_packet
 from .experience import ExperienceSummary, summarize_experience
 from .organisation import AgentAssignment, OrganisationPlanner, OrganisationPlan
-from .registry import HermesRegistry
+from .registry import HermesRegistry, get_default_registry
 
 __all__ = [
     "AgentAssignment",
@@ -17,5 +17,6 @@ __all__ = [
     "OrganisationPlan",
     "OrganisationPlanner",
     "build_context_packet",
+    "get_default_registry",
     "summarize_experience",
 ]
