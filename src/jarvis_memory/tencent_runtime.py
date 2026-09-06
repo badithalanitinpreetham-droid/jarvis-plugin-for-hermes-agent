@@ -83,13 +83,6 @@ class TencentRuntime:
         tmp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         tmp.replace(path)
 
-    @classmethod
-    def _clear_state(cls, home: Path) -> None:
-        try:
-            cls._state_path(home).unlink()
-        except (FileNotFoundError, OSError):
-            pass
-
     def _ensure_tencent_source(self, home: Path) -> Path:
         target = home / ".jarvis" / "tencentdb" / "source"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -168,10 +161,9 @@ class TencentRuntime:
             return False
 
     def _ensure_ollama_model(self, home: Path, executable: str, model: str) -> None:
-        if self._ollama_model_available(executable, model):
-            return
-        self._run([executable, "pull", model], timeout=1800,
-                  log_file=home / ".jarvis" / "logs" / "ollama-pull.log")
+        if not self._ollama_model_available(executable, model):
+            self._run([executable, "pull", model], timeout=1800,
+                      log_file=home / ".jarvis" / "logs" / "ollama-pull.log")
 
     def _previous_ollama_is_still_owned(self, state: dict[str, object]) -> bool:
         if state.get("ollama_owned") is not True:
@@ -224,6 +216,17 @@ class TencentRuntime:
         }
         self._save_state(home, state)
 
+    def _rollback_start(self, home: Path) -> None:
+        if self._tencent_owned and self._tencent_root is not None:
+            self._stop_tencent(self._tencent_root / "deploy" / "global-images",
+                               home / ".jarvis" / "logs" / "tencent-runtime.log")
+        if self._ollama_owned and self._ollama_process is not None:
+            self._kill_process_group(self._ollama_process.pid)
+        self._ollama_process = None
+        self._ollama_owned = False
+        self._tencent_owned = False
+        self._started = False
+
     def start(self, hermes_home: Optional[str] = None, *, force: bool = False) -> None:
         with self._lock:
             if self._started:
@@ -241,30 +244,25 @@ class TencentRuntime:
             self._root = home
             previous_root = previous.get("tencent_root")
             self._tencent_root = Path(str(previous_root)).expanduser() if previous_root else self._ensure_tencent_source(home)
-            self._start_ollama(home, model, previous)
-            deploy = self._tencent_root / "deploy" / "global-images"
-            self._env_file(self._tencent_root, model)
-            log = home / ".jarvis" / "logs" / "tencent-runtime.log"
-            services_up = all(self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096))
-            if services_up:
-                self._tencent_owned = previous.get("tencent_owned") is True
-            else:
-                try:
+            try:
+                self._start_ollama(home, model, previous)
+                deploy = self._tencent_root / "deploy" / "global-images"
+                self._env_file(self._tencent_root, model)
+                log = home / ".jarvis" / "logs" / "tencent-runtime.log"
+                services_up = all(self._port_open("127.0.0.1", port) for port in (8420, 8125, 8096))
+                if services_up:
+                    self._tencent_owned = previous.get("tencent_owned") is True
+                else:
                     for script in ("start-memory-core.sh", "start-memory-hub.sh", "start-proxy.sh"):
                         self._run(["bash", script], cwd=deploy, timeout=300, log_file=log)
-                    self._tencent_owned = True
-                except Exception:
-                    # Do not leave a partially started Tencent/Ollama stack behind after a failed start.
-                    if self._tencent_owned:
-                        self._stop_tencent(deploy, log)
-                    if self._ollama_owned and self._ollama_process is not None:
-                        self._kill_process_group(self._ollama_process.pid)
-                    self._ollama_process = None
-                    self._ollama_owned = False
-                    self._tencent_owned = False
-                    raise
-            self._started = True
-            self._persist_runtime_state(home, enabled=True)
+                        # Once the first Tencent component has started, the whole stack is
+                        # considered Jarvis-owned for rollback, even if a later component fails.
+                        self._tencent_owned = True
+                self._started = True
+                self._persist_runtime_state(home, enabled=True)
+            except Exception:
+                self._rollback_start(home)
+                raise
 
     def _stop_tencent(self, deploy: Path, log: Path) -> None:
         script = deploy / "stop-all.sh"
@@ -280,10 +278,9 @@ class TencentRuntime:
             state = self._load_state(home)
             tencent_root_value = state.get("tencent_root") or self._tencent_root
             tencent_root = Path(str(tencent_root_value)).expanduser() if tencent_root_value else None
-            tencent_owned = bool(state.get("tencent_owned") or self._tencent_owned)
-            if tencent_owned and tencent_root is not None:
+            if bool(state.get("tencent_owned") or self._tencent_owned) and tencent_root is not None:
                 self._stop_tencent(tencent_root / "deploy" / "global-images",
-                                    home / ".jarvis" / "logs" / "tencent-runtime.log")
+                                   home / ".jarvis" / "logs" / "tencent-runtime.log")
             ollama_owned = bool(state.get("ollama_owned") or self._ollama_owned)
             ollama_pid_value = state.get("ollama_pid")
             if ollama_owned and ollama_pid_value:
@@ -302,8 +299,6 @@ class TencentRuntime:
             self._root = home
             self._tencent_root = tencent_root
             self._persist_runtime_state(home, enabled=not disable)
-            if not disable and not self._tencent_root:
-                self._clear_state(home)
 
     def status(self, hermes_home: Optional[str] = None) -> dict[str, object]:
         home = self._root or self._home(hermes_home)
