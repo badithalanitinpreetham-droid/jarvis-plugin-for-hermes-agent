@@ -216,8 +216,8 @@ Output ONLY valid JSON in this format:
                 elif "succeeded" in lower or "completed" in lower:
                     confidence_boost += 0.05
 
-        base_conf_1 = max(0.3, min(1.0, 0.8 + confidence_boost))
-        base_conf_2 = max(0.3, min(1.0, 0.7 + confidence_boost))
+        base_conf_1 = max(0.3, min(1.0, 0.95 + confidence_boost))
+        base_conf_2 = max(0.3, min(1.0, 0.90 + confidence_boost))
 
         plan = {
             "goal": goal,
@@ -422,7 +422,7 @@ Output ONLY valid JSON in this format:
         # Build the retry step — same action but with alternative approach marker
         retry_confidence = max(0.3, failed_step_data.get("confidence", 0.7) - 0.2)
         retry_step = {
-            "id": 1,
+            "id": failed_step_data.get("id", failed_step),
             "action": f"[RETRY] {failed_step_data.get('action', 'Unknown action')}",
             "tool": failed_step_data.get("tool", "execute"),
             "parameters": {
@@ -430,17 +430,22 @@ Output ONLY valid JSON in this format:
                 "_retry_reason": error[:200],
                 "_original_step_id": failed_step,
             },
-            "confidence": retry_confidence,
+            "confidence": round(retry_confidence, 2),
             "risk": failed_step_data.get("risk", "medium"),
             "requires_approval": True,  # Always gate retries for safety
             "approach": "alternative",
         }
+        
+        if "dedupe_key" in failed_step_data:
+            retry_step["dedupe_key"] = failed_step_data["dedupe_key"]
+            
+        if "race_group_id" in failed_step_data:
+            retry_step["race_group_id"] = failed_step_data["race_group_id"]
 
-        # Preserve remaining steps with re-numbered IDs
+        # Preserve remaining steps with their original IDs
         new_steps = [retry_step]
-        for i, step in enumerate(remaining_steps):
+        for step in remaining_steps:
             preserved = dict(step)
-            preserved["id"] = i + 2  # Continues from retry step (id=1)
             new_steps.append(preserved)
 
         return {
