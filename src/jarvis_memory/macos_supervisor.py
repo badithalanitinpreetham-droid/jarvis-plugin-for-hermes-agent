@@ -119,7 +119,7 @@ def run(home: Optional[str] = None) -> int:
             healthy = all(bool(current.get(key)) for key in (
                 "ollama_reachable", "memory_core_reachable", "memory_hub_reachable", "proxy_reachable"))
             if not healthy:
-                runtime.start(str(root), force=True)
+                runtime.recover(str(root))
         except Exception as exc:
             with log.open("a", encoding="utf-8") as handle:
                 handle.write(f"supervisor recovery error: {exc}\n")
