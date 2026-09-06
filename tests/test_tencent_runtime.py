@@ -4,15 +4,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from jarvis_memory.tencent_runtime import (
-    DEFAULT_EMBEDDING_MODEL,
-    DEFAULT_OLLAMA_MODEL,
-    TencentRuntime,
-)
+from jarvis_memory.tencent_runtime import DEFAULT_OLLAMA_MODEL, TencentRuntime
 
 
 class TestTencentRuntime(unittest.TestCase):
-    def test_model_provisioning_pulls_missing_models_only(self):
+    def test_model_provisioning_pulls_missing_model_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             runtime = TencentRuntime()
             commands = []
@@ -20,13 +16,9 @@ class TestTencentRuntime(unittest.TestCase):
             def fake_run(cmd, **kwargs):
                 commands.append(cmd)
 
-            with patch.object(runtime, "_ollama_model_available", side_effect=[False, True]), \
+            with patch.object(runtime, "_ollama_model_available", return_value=False), \
                  patch.object(runtime, "_run", side_effect=fake_run):
-                runtime._ensure_ollama_models(
-                    Path(tmp),
-                    "ollama",
-                    [DEFAULT_OLLAMA_MODEL, DEFAULT_EMBEDDING_MODEL],
-                )
+                runtime._ensure_ollama_model(Path(tmp), "ollama", DEFAULT_OLLAMA_MODEL)
 
             self.assertEqual(commands, [["ollama", "pull", DEFAULT_OLLAMA_MODEL]])
 
@@ -62,7 +54,7 @@ class TestTencentRuntime(unittest.TestCase):
             state_dir.mkdir(parents=True)
             (state_dir / "runtime-state.json").write_text(
                 json.dumps({
-                    "version": 2,
+                    "version": 3,
                     "enabled": True,
                     "hermes_home": str(home),
                     "tencent_root": "",
@@ -70,6 +62,7 @@ class TestTencentRuntime(unittest.TestCase):
                     "ollama_owned": True,
                     "ollama_pid": 4242,
                     "ollama_pgid": 4242,
+                    "ollama_model": DEFAULT_OLLAMA_MODEL,
                 }),
                 encoding="utf-8",
             )
@@ -77,10 +70,10 @@ class TestTencentRuntime(unittest.TestCase):
             with patch.object(runtime, "_process_command", return_value="ollama serve"), \
                  patch.object(runtime, "_port_open", return_value=True), \
                  patch.object(runtime, "_ollama_model_available", return_value=True):
-                runtime._start_ollama(home, DEFAULT_OLLAMA_MODEL, DEFAULT_EMBEDDING_MODEL, runtime._load_state(home))
+                runtime._start_ollama(home, DEFAULT_OLLAMA_MODEL, runtime._load_state(home))
             self.assertTrue(runtime._ollama_owned)
 
-    def test_start_records_selected_models(self):
+    def test_start_records_selected_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / ".hermes"
             tencent = home / ".jarvis" / "tencentdb" / "source"
@@ -93,7 +86,6 @@ class TestTencentRuntime(unittest.TestCase):
                 runtime.start(str(home), force=True)
             state = json.loads((home / ".jarvis" / "runtime-state.json").read_text(encoding="utf-8"))
             self.assertEqual(state["ollama_model"], DEFAULT_OLLAMA_MODEL)
-            self.assertEqual(state["embedding_model"], DEFAULT_EMBEDDING_MODEL)
 
 
 if __name__ == "__main__":
