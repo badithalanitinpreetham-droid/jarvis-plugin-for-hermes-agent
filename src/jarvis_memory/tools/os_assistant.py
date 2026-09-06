@@ -63,7 +63,7 @@ class OSAssistant:
             if action == "set_volume":
                 # value should be 0 to 100
                 vol = int(value)
-                subprocess.run(["osascript", "-e", f"set volume output volume {vol}"], check=True)
+                subprocess.run(["osascript", "-e", f"set volume output volume {vol}"], check=True, capture_output=True, text=True)
                 return f"Volume set to {vol}%"
                 
             elif action == "mute":
@@ -96,5 +96,8 @@ class OSAssistant:
             else:
                 return f"Unknown OS action: {action}"
                 
+        except subprocess.CalledProcessError as e:
+            err_msg = e.stderr.strip() if e.stderr else str(e)
+            return f"OS Control failed for {action}: {err_msg}"
         except Exception as e:
             return f"OS Control failed for {action}: {str(e)}"

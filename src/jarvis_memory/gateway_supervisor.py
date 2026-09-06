@@ -229,9 +229,25 @@ class GatewaySupervisor:
                         logger.critical(f"SYSTEM OVERLOAD DETECTED: {', '.join(critical_issues)}. Triggering auto-recovery workflow.")
                         
                         goal = f"EMERGENCY: {', '.join(critical_issues)}. Find the rogue processes causing this and kill them to restore system health."
-                        from .tools.planner import WorkflowPlanner
-                        local_planner = WorkflowPlanner(memory_engine=self.memory, store=self.autonomous_executor.store)
-                        plan = local_planner.create_plan(goal, "system_admin_bot")
+                        
+                        # Bypass AI planning (which requires heavy compute) to prevent Death Spiral (Defect 6)
+                        plan = {
+                            "goal": goal,
+                            "steps": [
+                                {
+                                    "id": 1,
+                                    "action": "Diagnose top CPU/RAM consuming processes.",
+                                    "tool": "jarvis_os_control",
+                                    "parameters": {"action": "diagnose_load"},
+                                    "confidence": 0.9,
+                                    "risk": "medium",
+                                    "requires_approval": True
+                                }
+                            ],
+                            "estimated_steps": 1,
+                            "success_criteria": "System load returned to normal",
+                            "fallback_mode": True
+                        }
                         
                         import uuid
                         wf_id = f"auto-recovery-{uuid.uuid4().hex[:8]}"

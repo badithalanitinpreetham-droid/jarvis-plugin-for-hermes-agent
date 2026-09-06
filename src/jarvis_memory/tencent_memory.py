@@ -170,7 +170,11 @@ class TencentMemoryClient:
         # lesson as the mem0 response-shape drift this replaced.
         if isinstance(result, list):
             return result
-        return result.get("results", []) or result.get("memories", []) or []
+        elif isinstance(result, dict):
+            return result.get("results", []) or result.get("memories", []) or []
+        elif isinstance(result, str):
+            return [{"memory": result}]
+        return []
 
     def session_end(self, user_id: str) -> Dict[str, Any]:
         """Drain any in-flight extraction for this profile/session."""
