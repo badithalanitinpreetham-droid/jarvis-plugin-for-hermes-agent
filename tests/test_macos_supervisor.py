@@ -16,6 +16,7 @@ class TestMacOSSupervisor(unittest.TestCase):
             self.assertIn(sys.executable, text)
             self.assertIn("KeepAlive", text)
             self.assertIn("RunAtLoad", text)
+            self.assertIn("HERMES_HOME", text)
 
     def test_status_is_safe_on_non_macos(self):
         with patch("jarvis_memory.macos_supervisor.sys.platform", "linux"):
