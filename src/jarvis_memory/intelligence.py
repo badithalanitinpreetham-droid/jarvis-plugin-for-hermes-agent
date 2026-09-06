@@ -9,22 +9,9 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 from .evolution import EvolutionEngine
 from .experience_store import ExperienceStore
 
-
-_SIMPLE_RE = re.compile(
-    r"^(?:hi|hello|hey|thanks|thank you|ok|okay|sure|yes|no|continue|go ahead|do it|done|next)[\s!?.:;,`'\"~()\[\]{}<>*&^%$#@!+=-]*$",
-    re.IGNORECASE,
-)
-_COMPLEX_HINTS = (
-    "build", "create", "develop", "research", "compare", "analyse", "analyze", "report",
-    "documentary", "video", "youtube", "automate", "automation", "pipeline", "deploy", "publish",
-    "monitor", "every day", "every week", "continuously", "multiple", "end-to-end", "workflow",
-    "project", "production", "investigate", "implement", "migrate", "refactor",
-)
-_DELIVERABLE_HINTS = (
-    "report", "document", "file", "spreadsheet", "presentation", "video", "script", "dataset",
-    "codebase", "repository", "package", "plan", "proposal", "email", "post", "thumbnail", "artifact",
-)
-
+_SIMPLE_RE = re.compile(r"^(?:hi|hello|hey|thanks|thank you|ok|okay|sure|yes|no|continue|go ahead|do it|done|next)[\s!?.:;,`'\"~()\[\]{}<>*&^%$#@!+=-]*$", re.IGNORECASE)
+_COMPLEX_HINTS = ("build", "create", "develop", "research", "compare", "analyse", "analyze", "report", "documentary", "video", "youtube", "automate", "automation", "pipeline", "deploy", "publish", "monitor", "every day", "every week", "continuously", "multiple", "end-to-end", "workflow", "project", "production", "investigate", "implement", "migrate", "refactor")
+_DELIVERABLE_HINTS = ("report", "document", "file", "spreadsheet", "presentation", "video", "script", "dataset", "codebase", "repository", "package", "plan", "proposal", "email", "post", "thumbnail", "artifact")
 
 @dataclass(frozen=True)
 class RoutingDecision:
@@ -35,10 +22,8 @@ class RoutingDecision:
     suggested_roles: List[str] = field(default_factory=list)
     confidence: float = 0.0
 
-
 class JarvisIntelligence:
     """Decision layer. Jarvis recommends; Hermes owns worker/tool execution."""
-
     def __init__(self, registry: Any = None, store: Optional[ExperienceStore] = None) -> None:
         self.registry = registry
         self.store = store or ExperienceStore()
@@ -95,10 +80,7 @@ class JarvisIntelligence:
         for bot in bots:
             bot_id = str(bot.get("id", bot.get("name", "")))
             bot_name = str(bot.get("name", bot_id))
-            blob = " ".join(
-                str(bot.get(key, ""))
-                for key in ("name", "role", "description", "capabilities", "skills", "toolsets")
-            )
+            blob = " ".join(str(bot.get(key, "")) for key in ("name", "role", "description", "capabilities", "skills", "toolsets"))
             bot_tokens = self._tokens(blob)
             overlap = len(goal_tokens & bot_tokens)
             role_overlap = len(role_tokens & bot_tokens)
@@ -106,13 +88,8 @@ class JarvisIntelligence:
             declared = float(bot.get("performance", bot.get("success_rate", 0.0)) or 0.0)
             performance = max(0.0, min(1.0, max(measured, declared)))
             configured = bot.get("configured", bot.get("available", True))
-            availability = 0.1 if configured else -1.0
-            score = overlap * 0.8 + role_overlap * 1.2 + performance * 2.0 + availability
-            scored.append((score, {
-                **bot,
-                "performance": round(performance, 3),
-                "jarvis_score": round(score, 3),
-            }))
+            score = overlap * 0.8 + role_overlap * 1.2 + performance * 2.0 + (0.1 if configured else -1.0)
+            scored.append((score, {**bot, "performance": round(performance, 3), "jarvis_score": round(score, 3)}))
         scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("id", pair[1].get("name", "")))))
         return [bot for _, bot in scored]
 
@@ -128,36 +105,19 @@ class JarvisIntelligence:
         bots: List[Dict[str, Any]] = []
         if self.registry is not None:
             try:
-                bots = list(self.registry.list_bots())
+                bots = list(self.registry.bots())
             except Exception:
                 bots = []
         ranked = self.rank_bots(goal, bots, decision.suggested_roles)
-        evolution = self.evolution.render_for_context(goal)
-        return {
-            "routing": decision.__dict__,
-            "profile_id": profile_id,
-            "recommended_bots": ranked[:6],
-            "experience": recent[:limit],
-            "lessons": lessons[:10],
-            "self_evolution": evolution,
-        }
+        return {"routing": decision.__dict__, "profile_id": profile_id, "recommended_bots": ranked[:6], "experience": recent[:limit], "lessons": lessons[:10], "self_evolution": self.evolution.render_for_context(goal)}
 
-    def observe_outcome(self, *, goal: str, status: str, profile_id: str = "", session_id: str = "",
-                        strategy: str = "", bots: Optional[Iterable[str]] = None,
-                        deliverable: str = "", quality: Optional[float] = None,
-                        evidence: Optional[Dict[str, Any]] = None,
-                        lessons: Optional[Iterable[str]] = None) -> int:
-        return self.store.record_outcome(
-            goal=goal, status=status, profile_id=profile_id, session_id=session_id,
-            strategy=strategy, bots=bots, deliverable=deliverable, quality=quality,
-            evidence=evidence, lessons=lessons,
-        )
+    def observe_outcome(self, *, goal: str, status: str, profile_id: str = "", session_id: str = "", strategy: str = "", bots: Optional[Iterable[str]] = None, deliverable: str = "", quality: Optional[float] = None, evidence: Optional[Dict[str, Any]] = None, lessons: Optional[Iterable[str]] = None) -> int:
+        return self.store.record_outcome(goal=goal, status=status, profile_id=profile_id, session_id=session_id, strategy=strategy, bots=bots, deliverable=deliverable, quality=quality, evidence=evidence, lessons=lessons)
 
     def evolve_policy(self, key: str, *, success: bool, proposal: str, confidence: float = 0.6) -> Dict[str, Any]:
         return self.evolution.record_trial(key, proposal, success=success, confidence=confidence)
 
     def close(self) -> None:
         self.store.close()
-
 
 __all__ = ["JarvisIntelligence", "RoutingDecision"]
