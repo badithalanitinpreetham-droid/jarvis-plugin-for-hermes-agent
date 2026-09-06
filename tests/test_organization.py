@@ -6,6 +6,7 @@ import unittest
 from jarvis_memory.orchestration.context import build_context_packet
 from jarvis_memory.orchestration.experience import summarize_experience
 from jarvis_memory.orchestration.organisation import OrganisationPlanner
+from jarvis_memory.tools.planner import WorkflowPlanner
 
 
 class TestOrganisationPlanner(unittest.TestCase):
@@ -37,6 +38,30 @@ class TestOrganisationPlanner(unittest.TestCase):
         plan = self.planner.design("Build a software application")
         self.assertTrue(all(item.bot_preference == "existing_first" for item in plan.assignments))
         self.assertTrue(plan.kanban_policy["reuse_existing_bots_first"])
+
+    def test_roster_selects_matching_existing_bot(self):
+        plan = self.planner.design(
+            "Research competitors",
+            available_bots=[
+                {"id": "writer_bot", "role": "writer", "capabilities": ["writing"]},
+                {"id": "research_bot", "role": "researcher", "capabilities": ["web_research"]},
+            ],
+        )
+        researcher = next(item for item in plan.assignments if item.role == "researcher")
+        self.assertEqual(researcher.selected_bot, "research_bot")
+        self.assertEqual(plan.available_bot_count, 2)
+        self.assertFalse(plan.unfilled_roles)
+
+    def test_context_json_can_supply_hermes_roster(self):
+        planner = WorkflowPlanner(llm_client=None, memory_engine=None, store=None)
+        plan = planner.create_plan(
+            "Research competitors",
+            "user",
+            context='{"working_context":"Public sources only", "available_bots":[{"id":"research_bot","role":"researcher","capabilities":["web_research"]}]}',
+        )
+        researcher = next(item for item in plan["organisation"]["assignments"] if item["role"] == "researcher")
+        self.assertEqual(researcher["selected_bot"], "research_bot")
+        self.assertEqual(plan["context_packet"]["working_context"], "Public sources only")
 
 
 class TestExperienceSummary(unittest.TestCase):
