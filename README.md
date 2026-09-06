@@ -77,9 +77,9 @@ reuse or provision pinned TencentDB source
   ↓
 start Ollama only when 11434 is not already running
   ↓
-ensure required Ollama models exist
+ensure required Ollama model exists
   ↓
-configure Tencent memory-core / hub / proxy → Ollama
+configure Tencent MEMORY_LLM_* and PROXY_* → Ollama
   ↓
 start Tencent memory-core
   ↓
@@ -88,7 +88,7 @@ start Tencent memory-hub
 start Tencent proxy
 ```
 
-`hermes stop jarvis` disables the Jarvis runtime and stops TencentDB plus **only the Ollama server process Jarvis started**. If Ollama was already running before Jarvis, Jarvis leaves it running.
+`hermes stop jarvis` stops TencentDB plus **only the Ollama server process Jarvis started**. If Ollama was already running before Jarvis, Jarvis leaves it running.
 
 The lifecycle state is persisted under:
 
@@ -102,11 +102,7 @@ This is necessary because `hermes start jarvis` and `hermes stop jarvis` are sep
 
 After Jarvis is installed and enabled, a normal Hermes session automatically loads the Jarvis plugin through Hermes' native plugin system. During the Hermes session-start hook Jarvis starts or reuses its owned services and attaches its intelligence and memory layer to Hermes. You continue to use only Hermes; Jarvis operates as an internal extension.
 
-If Jarvis was explicitly stopped with `hermes stop jarvis`, the persisted disabled state prevents the next normal Hermes session from automatically restarting its local services until:
-
-```bash
-hermes start jarvis
-```
+After `hermes stop jarvis`, the persisted disabled runtime state prevents normal Hermes hooks from restarting the local services. Start them again with `hermes start jarvis`.
 
 ## TencentDB + Ollama ownership
 
@@ -128,17 +124,23 @@ Jarvis provisions a persistent runtime checkout under:
 ~/.hermes/.jarvis/tencentdb/source
 ```
 
-The runtime checkout is cloned only when missing and is pinned to the same Tencent revision, so later Jarvis starts reuse it rather than reinstalling TencentDB.
+The runtime checkout is cloned only when missing and pinned to the same Tencent revision, so later Jarvis starts reuse it rather than reinstalling TencentDB.
 
-## Automatic Ollama models
+## Automatic Ollama configuration
 
-Yes. Jarvis automatically configures **TencentDB's local LLM and embedding paths to Ollama**.
+Yes. Jarvis automatically configures TencentDB's **supported LLM settings** to use the local Ollama OpenAI-compatible endpoint.
 
-Default models are:
+TencentDB's supported configuration is:
 
 ```text
-Tencent/Jarvis memory LLM: qwen3.5:4b
-Tencent/Jarvis embeddings: snowflake-arctic-embed2
+MEMORY_LLM_BASE_URL=http://host.docker.internal:11434/v1
+MEMORY_LLM_API_KEY=ollama
+MEMORY_LLM_MODEL=qwen3.5:4b
+MEMORY_LLM_PROTOCOL=openai
+
+PROXY_UPSTREAM_URL=http://host.docker.internal:11434/v1
+PROXY_UPSTREAM_API_KEY=ollama
+PROXY_UPSTREAM_MODEL=qwen3.5:4b
 ```
 
 On the first:
@@ -147,7 +149,7 @@ On the first:
 hermes start jarvis
 ```
 
-Jarvis checks whether those models are already installed in Ollama. Missing models are pulled automatically. Existing models are not downloaded again.
+Jarvis checks whether `qwen3.5:4b` is installed with `ollama show`. If it is missing, Jarvis automatically runs `ollama pull qwen3.5:4b`. Existing models are not downloaded again.
 
 The model files remain installed in Ollama after:
 
@@ -157,22 +159,25 @@ hermes stop jarvis
 
 Only the Ollama **server process** is stopped when Jarvis started that process.
 
-This does **not** replace Hermes' primary agent model. Hermes continues to control the model used for its main AIAgent loop. Jarvis automatically manages the Ollama models needed by its TencentDB memory backend.
-
-For the Tencent stack, the Docker containers reach the Mac host Ollama service through:
-
-```text
-http://host.docker.internal:11434/v1
-```
-
-You can override the defaults with:
-
-```bash
-export JARVIS_OLLAMA_MODEL=qwen3.5:4b
-export JARVIS_OLLAMA_EMBEDDING_MODEL=snowflake-arctic-embed2
-```
+This model is for Jarvis/TencentDB memory services. It does **not** replace Hermes' primary AIAgent model. Hermes continues to control its own main model/provider.
 
 The Tencent deployment itself remains Tencent's code; Jarvis invokes its supported `start-memory-core.sh`, `start-memory-hub.sh`, `start-proxy.sh`, and `stop-all.sh` scripts.
+
+## macOS watchdog
+
+macOS should use a native `launchd`-based supervisor for a future always-on watchdog rather than Linux `systemd` assumptions or a Python watchdog thread that disappears with the CLI process.
+
+The current Jarvis lifecycle already uses a dedicated Ollama process group and persisted PID ownership, which is appropriate for normal macOS `start`/`stop` operation. A future watchdog can be added as:
+
+```text
+launchd user agent
+       ↓
+Jarvis supervisor
+       ├── Ollama
+       └── TencentDB Docker stack
+```
+
+The watchdog should monitor the services and restart only Jarvis-owned components. Hermes' own application/startup watchdog should remain separate.
 
 ## In-Hermes controls
 
@@ -194,7 +199,7 @@ External deployments can disable automatic local service startup with:
 export JARVIS_TENCENT_AUTOSTART=0
 ```
 
-In that mode Jarvis does not automatically start or stop the local Tencent/Ollama runtime during normal Hermes lifecycle hooks. The explicit `hermes start jarvis` command remains the operator control and forces the runtime on.
+In that mode Jarvis does not automatically start the local Tencent/Ollama runtime during normal Hermes lifecycle hooks. The explicit `hermes start jarvis` command remains the operator control and forces the runtime on.
 
 ## Plug out
 
