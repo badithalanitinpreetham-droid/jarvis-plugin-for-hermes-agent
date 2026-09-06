@@ -112,26 +112,9 @@ def setup_and_start_gateway():
             logger.error("'npm' (Node.js) is required to run the memory database.")
             sys.exit(1)
 
-    # 3. Start the gateway in the background
-    logger.info("Starting Memory Database Gateway...")
-    try:
-        kwargs = {}
-        if sys.platform != "win32":
-            kwargs["start_new_session"] = True
-            
-        # We start the gateway and let it run in the background
-        p = subprocess.Popen(
-            ["npm", "start"], 
-            cwd=gateway_dir,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **kwargs
-        )
-        _spawned_processes.append(p)
-        # Give it a moment to boot
-        time.sleep(3)
-    except Exception as e:
-        logger.error(f"Failed to start Memory Gateway: {e}")
+    # 3. Export configuration for GatewaySupervisor to own and auto-restart it
+    os.environ["GATEWAY_START_CMD"] = "npm start"
+    os.environ["GATEWAY_CWD"] = gateway_dir
 
 
 def pull_model(model_name: str):

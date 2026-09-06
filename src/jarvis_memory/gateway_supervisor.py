@@ -106,10 +106,21 @@ class GatewaySupervisor:
         if not self.start_cmd:
             return
         logger.info("Spawning MemoryCore Gateway: %s", " ".join(self.start_cmd))
+        
+        kwargs = {}
+        import sys
+        if sys.platform != "win32":
+            kwargs["start_new_session"] = True
+            
+        import os
+        cwd = os.environ.get("GATEWAY_CWD")
+        
         self._proc = subprocess.Popen(
             self.start_cmd,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            cwd=cwd,
+            **kwargs
         )
         self._we_own_process = True
         self._consecutive_misses = 0
