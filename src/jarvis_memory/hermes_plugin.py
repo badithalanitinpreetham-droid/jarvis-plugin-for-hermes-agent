@@ -8,7 +8,8 @@ from __future__ import annotations
 
 import json
 import threading
-from typing import Any, Dict, Iterable, Optional
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 from .experience_store import ExperienceStore
 from .intelligence import JarvisIntelligence
@@ -23,18 +24,19 @@ class JarvisPluginRuntime:
         self._registry: Optional[HermesRegistry] = None
         self._store: Optional[ExperienceStore] = None
         self._intelligence: Optional[JarvisIntelligence] = None
-        self._home = None
+        self._home: Optional[Path] = None
         self._started = False
 
     def start(self, hermes_home: Optional[str] = None) -> None:
         with self._lock:
-            if self._started:
+            requested = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
+            if self._started and self._home == requested:
                 return
-            from pathlib import Path
-            home = Path(hermes_home).expanduser() if hermes_home else Path.home() / ".hermes"
-            self._home = home
-            self._registry = HermesRegistry(hermes_home=home)
-            self._store = ExperienceStore(str(home / ".jarvis" / "experience.db"))
+            if self._started and self._home != requested:
+                self.close()
+            self._home = requested
+            self._registry = HermesRegistry(hermes_home=requested)
+            self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
             self._started = True
 
@@ -47,7 +49,7 @@ class JarvisPluginRuntime:
                 return str(item.get("content") or "")
         return ""
 
-    def pre_llm_context(self, *, messages: Any = None, session_id: str = "", profile_id: str = "", **kwargs: Any) -> str:
+    def pre_llm_context(self, *, messages: Any = None, profile_id: str = "", **kwargs: Any) -> str:
         self.start(kwargs.get("hermes_home"))
         goal = self._last_user_message(messages)
         if not goal or self._intelligence is None:
@@ -58,7 +60,7 @@ class JarvisPluginRuntime:
         packet = self._intelligence.context_for_goal(goal, profile_id=profile_id, limit=3)
         lines = [
             f"Jarvis routing: {decision.mode}. {decision.reason}.",
-            "For complex work, continue to use Hermes' native Bots, subagents and Kanban; Jarvis only recommends organisation.",
+            "For complex work, continue to use Hermes' native Bots, subagents and Kanban; Jarvis recommends organisation and memory only.",
         ]
         bots = packet.get("recommended_bots") or []
         if bots:
@@ -70,13 +72,16 @@ class JarvisPluginRuntime:
 
     def observe_tool(self, *, tool_name: str = "", result: Any = None, session_id: str = "", profile_id: str = "", **kwargs: Any) -> None:
         self.start(kwargs.get("hermes_home"))
-        if self._intelligence is None:
+        if self._intelligence is None or not tool_name:
             return
         result_text = str(result or "")
-        status = "success" if not any(x in result_text.lower() for x in ("error", "exception", "failed")) else "failed"
+        failed = isinstance(result, dict) and bool(result.get("error"))
+        if isinstance(result, str):
+            stripped = result.lstrip().lower()
+            failed = failed or stripped.startswith(("error:", "exception:", "traceback"))
         self._intelligence.observe_outcome(
             goal=f"Hermes tool: {tool_name}",
-            status=status,
+            status="failed" if failed else "success",
             profile_id=profile_id,
             session_id=session_id,
             strategy="hermes_tool",
@@ -88,9 +93,10 @@ class JarvisPluginRuntime:
         if self._intelligence is None:
             return
         result_text = str(result or "")
+        failed = isinstance(result, dict) and bool(result.get("error"))
         self._intelligence.observe_outcome(
             goal=task,
-            status="success" if result_text.strip() else "failed",
+            status="failed" if failed or not result_text.strip() else "success",
             profile_id=profile_id,
             session_id=session_id,
             strategy="hermes_subagent",
@@ -106,6 +112,7 @@ class JarvisPluginRuntime:
             self._registry = None
             self._store = None
             self._intelligence = None
+            self._home = None
             self._started = False
 
 
@@ -130,7 +137,6 @@ def _on_subagent_stop(**kwargs: Any) -> None:
 
 
 def _on_session_end(**kwargs: Any) -> None:
-    # Do not close the process-global runtime here: gateway/CLI may reuse it for another session.
     return None
 
 
@@ -139,7 +145,9 @@ def _jarvis_orchestrate(arguments: Dict[str, Any], **kwargs: Any) -> str:
     goal = str(arguments.get("goal") or "").strip()
     if not goal:
         return json.dumps({"error": "goal is required"})
-    packet = _RUNTIME._intelligence.context_for_goal(goal, profile_id=str(arguments.get("profile_id") or "default"), limit=6) if _RUNTIME._intelligence else {}
+    packet = _RUNTIME._intelligence.context_for_goal(
+        goal, profile_id=str(arguments.get("profile_id") or "default"), limit=6
+    ) if _RUNTIME._intelligence else {}
     return json.dumps(packet, ensure_ascii=False, default=str)
 
 
@@ -162,6 +170,29 @@ def _jarvis_record_outcome(arguments: Dict[str, Any], **kwargs: Any) -> str:
     return json.dumps({"recorded": True, "outcome_id": outcome_id})
 
 
+_ORCHESTRATE_SCHEMA = {
+    "type": "object",
+    "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}},
+    "required": ["goal"],
+}
+_RECORD_OUTCOME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "goal": {"type": "string"},
+        "status": {"type": "string", "enum": ["success", "failed", "partial"]},
+        "profile_id": {"type": "string"},
+        "session_id": {"type": "string"},
+        "strategy": {"type": "string"},
+        "bots": {"type": "array", "items": {"type": "string"}},
+        "deliverable": {"type": "string"},
+        "quality": {"type": "number"},
+        "evidence": {"type": "object"},
+        "lessons": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["goal"],
+}
+
+
 def register(ctx: Any) -> None:
     """Native Hermes plugin registration. No core Hermes files are modified."""
     ctx.register_hook("on_session_start", _on_session_start)
@@ -169,12 +200,20 @@ def register(ctx: Any) -> None:
     ctx.register_hook("post_tool_call", _on_post_tool_call)
     ctx.register_hook("subagent_stop", _on_subagent_stop)
     ctx.register_hook("on_session_end", _on_session_end)
-    try:
-        ctx.register_tool("jarvis_orchestrate", "Ask Jarvis to analyse a goal and recommend Hermes workforce organisation", _jarvis_orchestrate)
-        ctx.register_tool("jarvis_record_outcome", "Record a completed work outcome so Jarvis can learn from it", _jarvis_record_outcome)
-    except TypeError:
-        # Hermes versions before the current register_tool signature may accept a schema object.
-        pass
+    ctx.register_tool(
+        name="jarvis_orchestrate",
+        toolset="jarvis",
+        schema=_ORCHESTRATE_SCHEMA,
+        handler=_jarvis_orchestrate,
+        description="Analyse a goal and recommend how Hermes should organise its existing workforce.",
+    )
+    ctx.register_tool(
+        name="jarvis_record_outcome",
+        toolset="jarvis",
+        schema=_RECORD_OUTCOME_SCHEMA,
+        handler=_jarvis_record_outcome,
+        description="Record a completed work outcome so Jarvis can learn from it.",
+    )
 
 
 __all__ = ["JarvisPluginRuntime", "register"]
