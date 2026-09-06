@@ -41,8 +41,5 @@ jarvis = "jarvis_memory.hermes_plugin"
 [project.entry-points."hermes_agent.memory_providers"]
 jarvis = "jarvis_memory.hermes_memory_provider:provider_factory"
 
-[project.scripts]
-jarvis-server = "jarvis_memory.orchestrator:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
