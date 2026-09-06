@@ -1,5 +1,6 @@
 ---
 name: Jarvis System Administrator
+version: 1.0
 description: Hermes-native lifecycle, health, memory, local runtime, and macOS launchd supervision for the Jarvis plugin.
 ---
 
