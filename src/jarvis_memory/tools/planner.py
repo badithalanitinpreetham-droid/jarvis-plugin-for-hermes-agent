@@ -94,7 +94,42 @@ def validate_plan(plan: Dict[str, Any]) -> Optional[str]:
         dependencies = step.get("depends_on", [])
         if dependencies is not None and not isinstance(dependencies, list):
             return f"step {index} depends_on must be a list"
+        if isinstance(dependencies, list):
+            for dependency in dependencies:
+                if str(dependency) == step_id:
+                    return f"step {index} cannot depend on itself"
+                if str(dependency) not in ids and not any(
+                    str(other.get("id")) == str(dependency) for other in steps[: index + 1]
+                ):
+                    return f"step {index} depends on unknown step '{dependency}'"
 
+        execution_mode = step.get("execution_mode", "sequential")
+        if execution_mode not in {"sequential", "parallel", "race"}:
+            return f"step {index} execution_mode must be sequential/parallel/race"
+
+    # Reject dependency cycles with a small topological walk.
+    graph = {
+        str(step["id"]): [str(dep) for dep in step.get("depends_on", []) or []]
+        for step in steps
+    }
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(node: str) -> bool:
+        if node in visiting:
+            return False
+        if node in visited:
+            return True
+        visiting.add(node)
+        for dep in graph.get(node, []):
+            if dep not in graph or not visit(dep):
+                return False
+        visiting.remove(node)
+        visited.add(node)
+        return True
+
+    if any(not visit(node) for node in graph):
+        return "plan contains a dependency cycle"
     return None
 
 
@@ -272,6 +307,37 @@ Output JSON only with goal, steps, estimated_steps and success_criteria."""
             plan["lessons_applied"] = lessons
         return plan
 
+    @staticmethod
+    def _dependencies_for_role(role: str, assignments: List[Dict[str, Any]]) -> tuple[List[str], str]:
+        """Build a conservative DAG that exposes safe parallel work."""
+        ids_by_role = {str(item.get("role")): index for index, item in enumerate(assignments, start=1)}
+        current_index = ids_by_role.get(role)
+        if current_index is None:
+            return [], "sequential"
+
+        parallel_roles = {"researcher", "analyst"}
+        if role in parallel_roles:
+            return [], "parallel"
+
+        if role == "writer":
+            deps = [str(ids_by_role[name]) for name in ("researcher", "analyst") if name in ids_by_role]
+            return deps, "sequential" if deps else "parallel"
+
+        if role == "developer":
+            deps = [str(ids_by_role[name]) for name in ("researcher", "analyst") if name in ids_by_role]
+            return deps, "sequential" if deps else "parallel"
+
+        if role == "reviewer":
+            deps = [str(i) for i in range(1, current_index) if assignments[i - 1].get("role") != "reviewer"]
+            return deps, "sequential"
+
+        if role == "publisher":
+            if "reviewer" in ids_by_role:
+                return [str(ids_by_role["reviewer"])], "sequential"
+            return [str(i) for i in range(1, current_index)], "sequential"
+
+        return ([str(current_index - 1)] if current_index > 1 else []), "sequential"
+
     def _heuristic_plan(
         self,
         goal: str,
@@ -288,6 +354,7 @@ Output JSON only with goal, steps, estimated_steps and success_criteria."""
             role = assignment.get("role", f"worker-{index}")
             purpose = assignment.get("purpose", "Complete the assigned work.")
             is_last = index == len(assignments)
+            dependencies, execution_mode = self._dependencies_for_role(role, assignments)
             step = {
                 "id": index,
                 "action": f"{purpose} Role: {role}. Goal: {goal}",
@@ -300,7 +367,8 @@ Output JSON only with goal, steps, estimated_steps and success_criteria."""
                 "confidence": 0.85 if is_last else 0.9,
                 "risk": "medium" if is_last else "low",
                 "requires_approval": False,
-                "depends_on": [] if index == 1 else [index - 1],
+                "depends_on": dependencies,
+                "execution_mode": execution_mode,
             }
             if assignment.get("selected_bot"):
                 step["assigned_bot"] = assignment["selected_bot"]
