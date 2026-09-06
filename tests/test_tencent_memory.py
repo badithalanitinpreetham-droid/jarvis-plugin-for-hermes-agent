@@ -27,7 +27,7 @@ class FakeResponse:
     def __init__(self, status_code=200, json_body=None):
         self.status_code = status_code
         self._json_body = json_body if json_body is not None else {}
-        self.content = b"x"  # truthy so _request tries to parse json
+        self.content = b"x"
         self.text = "error body"
 
     def json(self):
@@ -35,13 +35,13 @@ class FakeResponse:
 
 
 class ScriptedTransport:
-    """Returns responses/raises in the order given, one per call."""
+    """Returns responses/raises in the order given, one per request."""
 
     def __init__(self, script):
         self.script = list(script)
         self.calls = 0
 
-    def request(self, method, url, headers=None, json=None):
+    def request(self, method, url, headers=None, json=None, timeout=None, **_kwargs):
         self.calls += 1
         item = self.script.pop(0)
         if isinstance(item, Exception):
@@ -87,7 +87,6 @@ class TestCircuitBreaker(unittest.TestCase):
         calls_before = client._client.calls
         with self.assertRaises(CircuitBreakerOpen):
             client._request("GET", "/health")
-        # The whole point of the breaker: no transport call while open.
         self.assertEqual(client._client.calls, calls_before)
 
     def test_circuit_closes_again_after_cooldown_elapses(self):
@@ -99,7 +98,6 @@ class TestCircuitBreaker(unittest.TestCase):
                 client._request("GET", "/health")
         self.assertIsNotNone(client._circuit_opened_at)
 
-        # Simulate the cooldown having elapsed without a real sleep.
         with patch("jarvis_memory.tencent_memory.time.monotonic", return_value=(
             client._circuit_opened_at + TencentMemoryClient.COOLDOWN_SECONDS + 1
         )):
