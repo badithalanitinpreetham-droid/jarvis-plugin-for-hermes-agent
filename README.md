@@ -1,6 +1,6 @@
-# 🧠 Jarvis for Hermes Agent (v4.2.0)
+# 🧠 Jarvis for Hermes Agent (v4.3.0)
 
-Jarvis is an MCP intelligence and experience layer for Hermes Agent. It keeps Hermes as the user interface, tool runner, Bot/profile system, subagent system, skill-evolution system and Kanban owner. Jarvis adds long-term organisational knowledge, dynamic work organisation, durable workflow state, recovery and experience-driven context.
+Jarvis is an MCP intelligence and experience layer for Hermes Agent. It keeps Hermes as the user interface, model reasoning, tool runner, Bot/profile system, subagent system, skill-evolution system and Kanban owner. Jarvis adds long-term organisational knowledge, dynamic work organisation, durable workflow state, recovery and experience-driven context.
 
 ## Architecture
 
@@ -10,10 +10,11 @@ YOU
 HERMES APP
   ↓
 JARVIS MCP
+  ├── Hermes Registry (read-only Bot/profile discovery)
   ├── TencentDB / MemoryCore long-term knowledge
   ├── experience and workflow lessons
   ├── dynamic Bot/agent organisation
-  ├── context broker
+  ├── bounded context broker
   └── durable workflow/recovery state
   ↓
 HERMES BOTS + TEMPORARY SUBAGENTS
@@ -47,9 +48,24 @@ Jarvis does **not** create a second tool framework, Kanban system, chatbot UI, o
 
 ## What Jarvis adds
 
-### Long-term knowledge
+### Hermes Bot/profile registry
 
-The configured MemoryCore/TencentDB backend stores durable profile, project and organisational knowledge. Jarvis retrieves only the relevant information for the current task rather than dumping all memory into a Bot.
+Jarvis discovers Hermes' configured profiles from `HERMES_HOME` (or the default `~/.hermes` layout) and treats that filesystem configuration as the source of truth for permanent workers.
+
+The registry can safely expose bounded metadata such as:
+
+- profile/Bot ID and display name;
+- role and description;
+- configured model and provider;
+- declared capabilities and installed skills;
+- configured toolsets;
+- terminal working directory;
+- bounded `SOUL.md` excerpt;
+- active/default flags and configuration validity.
+
+Credential files, authentication databases, sessions and memory stores are outside the registry boundary. Secret-looking keys are filtered before metadata enters Jarvis context. Discovery is cached and can be explicitly refreshed, so planning does not repeatedly scan Hermes' configuration tree.
+
+The same registry feeds organisation decisions and the worker context packet, so Jarvis does not maintain a separate copy of the Hermes workforce.
 
 ### Dynamic organisation
 
@@ -65,6 +81,10 @@ Jarvis analyses each goal and recommends how Hermes should organise the work:
 
 The recommendation is returned as structured data for Hermes. Hermes remains responsible for selecting the real Bot/profile or creating temporary workers using its own facilities.
 
+### Long-term knowledge
+
+The configured MemoryCore/TencentDB backend stores durable profile, project and organisational knowledge. Jarvis retrieves only relevant bounded context for the current task rather than dumping all memory into a Bot.
+
 ### Experience
 
 Jarvis records operational experience separately from a Bot's native memory:
@@ -77,11 +97,13 @@ Examples include successful procedures, recurring failures, useful recovery meth
 
 ### Context broker
 
-Before a Bot starts work, Jarvis can provide a bounded context packet containing the goal, relevant roles, project/task context and selected operational lessons. Retrieved memory is treated as untrusted data rather than executable instructions.
+Before a Bot starts work, Jarvis can provide a bounded context packet containing the goal, active profile metadata, known Hermes Bot roster, selected Bot metadata, project/task context and relevant operational lessons. Memory is treated as evidence rather than executable instructions.
 
 ### Durable workflows
 
-Jarvis retains workflow persistence, approvals, deduplication, replanning, cancellation, progress, reflection, scheduled goals, stall detection, tool-health state and Gateway supervision.
+Jarvis retains workflow persistence, approvals, dependency-aware dispatch, parallel/race coordination, deduplication, replanning, cancellation, progress, reflection, scheduled goals, stall detection, tool-health state and Gateway supervision.
+
+Workflow failures are terminal state until a deliberate retry/replan path replaces them. Approval state is persisted and cannot be bypassed by a restart or repeated polling call.
 
 ## Hermes skill evolution + Jarvis experience
 
@@ -156,11 +178,12 @@ src/jarvis_memory/
 ├── orchestrator.py            # local bootstrap / process orchestration
 ├── tencent_memory.py          # MemoryCore/TencentDB client
 │
-├── orchestration/             # Jarvis intelligence layer
+├── orchestration/
+│   ├── contracts.py           # shared plan validation contract
+│   ├── registry.py            # safe Hermes Bot/profile discovery + cache
 │   ├── organisation.py        # dynamic role / worker organisation
 │   ├── context.py             # bounded context packet for Hermes workers
-│   ├── experience.py          # operational experience summarisation
-│   └── __init__.py
+│   └── experience.py          # operational experience summarisation
 │
 └── tools/
     ├── planner.py             # planning + replanning
@@ -171,6 +194,7 @@ src/jarvis_memory/
 
 tests/
 ├── test_autonomous.py
+├── test_hardening.py
 ├── test_progress.py
 ├── test_replan.py
 ├── test_tencent_memory.py
@@ -179,7 +203,7 @@ tests/
 
 ## Safety
 
-High-risk or low-confidence workflow steps can require approval. Jarvis does not treat recalled memory, tool output, web content or other external data as instructions. Credentials and private keys are redacted before memory capture.
+High-risk or low-confidence workflow steps can require approval. Jarvis does not treat recalled memory, tool output, web content or other external data as instructions. Credentials and private keys are filtered or redacted before memory/context capture. Jarvis never executes Hermes tools itself.
 
 ## License
 
