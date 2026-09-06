@@ -100,8 +100,6 @@ class JarvisPluginRuntime:
 
     def close(self) -> None:
         with self._lock:
-            if not self._started:
-                return
             try:
                 if self._intelligence is not None:
                     self._intelligence.close()
@@ -112,7 +110,8 @@ class JarvisPluginRuntime:
                 self._store = None
                 self._intelligence = None
                 self._home = None
-                self._services.close()
+                if self._services is not None:
+                    self._services.stop()
                 self._started = False
 
 
@@ -179,69 +178,6 @@ def _jarvis_runtime(arguments: Dict[str, Any], **kwargs: Any) -> str:
     return json.dumps(_RUNTIME._services.status(kwargs.get("hermes_home")), ensure_ascii=False)
 
 
-def _setup_jarvis_start(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", choices=["jarvis"], help="Start Jarvis and its owned local services")
-
-
-def _setup_jarvis_stop(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("target", choices=["jarvis"], help="Stop Jarvis and its owned local services")
-
-
-def _handle_jarvis_start(args: argparse.Namespace) -> int:
-    get_tencent_runtime().start(os.environ.get("HERMES_HOME"), force=True)
-    state = get_tencent_runtime().status(os.environ.get("HERMES_HOME"))
-    print("Jarvis started.")
-    print(json.dumps(state, indent=2, sort_keys=True))
-    return 0
-
-
-def _handle_jarvis_stop(args: argparse.Namespace) -> int:
-    get_tencent_runtime().stop(os.environ.get("HERMES_HOME"), disable=True)
-    state = get_tencent_runtime().status(os.environ.get("HERMES_HOME"))
-    print("Jarvis stopped.")
-    print(json.dumps(state, indent=2, sort_keys=True))
-    return 0
-
-
-def _handle_command(raw_args: str) -> Optional[str]:
-    action = raw_args.strip().lower() or "status"
-    return _jarvis_runtime({"action": action})
-
-
-def register(ctx: Any) -> None:
-    """Register Jarvis with Hermes without starting services during CLI discovery."""
-    ctx.register_hook("on_session_start", _on_session_start)
-    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
-    ctx.register_hook("post_tool_call", _on_post_tool_call)
-    ctx.register_hook("subagent_stop", _on_subagent_stop)
-    ctx.register_hook("on_session_end", _on_session_end)
-    ctx.register_tool(name="jarvis_orchestrate", toolset="jarvis", schema=_ORCHESTRATE_SCHEMA,
-                      handler=_jarvis_orchestrate,
-                      description="Analyse a goal and recommend how Hermes should organise its existing workforce.")
-    ctx.register_tool(name="jarvis_record_outcome", toolset="jarvis", schema=_RECORD_OUTCOME_SCHEMA,
-                      handler=_jarvis_record_outcome,
-                      description="Record a completed work outcome so Jarvis can learn from it.")
-    ctx.register_tool(name="jarvis_runtime", toolset="jarvis", schema=_RUNTIME_SCHEMA,
-                      handler=_jarvis_runtime,
-                      description="Start, stop, or inspect Jarvis-owned TencentDB and Ollama services.")
-    ctx.register_command("jarvis", handler=_handle_command,
-                         description="Manage Jarvis-owned TencentDB and Ollama services.", args_hint="<status|start|stop>")
-    ctx.register_cli_command(
-        name="start",
-        help="Start a Hermes extension",
-        setup_fn=_setup_jarvis_start,
-        handler_fn=_handle_jarvis_start,
-        description="Start the Jarvis plugin and its Jarvis-owned TencentDB/Ollama runtime.",
-    )
-    ctx.register_cli_command(
-        name="stop",
-        help="Stop a Hermes extension",
-        setup_fn=_setup_jarvis_stop,
-        handler_fn=_handle_jarvis_stop,
-        description="Stop the Jarvis plugin's owned TencentDB/Ollama runtime without stopping Hermes.",
-    )
-
-
 _ORCHESTRATE_SCHEMA = {
     "type": "object", "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}}, "required": ["goal"],
 }
@@ -256,6 +192,79 @@ _RECORD_OUTCOME_SCHEMA = {
         "quality": {"type": "number"}, "evidence": {"type": "object"}, "lessons": {"type": "array", "items": {"type": "string"}},
     }, "required": ["goal"],
 }
+
+
+def _setup_jarvis_start(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("target", choices=["jarvis"], help="Start Jarvis and its owned local services")
+
+
+def _setup_jarvis_stop(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("target", choices=["jarvis"], help="Stop Jarvis and its owned local services")
+
+
+def _handle_jarvis_start(args: argparse.Namespace) -> int:
+    home = os.environ.get("HERMES_HOME")
+    runtime = get_tencent_runtime()
+    runtime.start(home, force=True)
+    state = runtime.status(home)
+    print("Jarvis started.")
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_jarvis_stop(args: argparse.Namespace) -> int:
+    home = os.environ.get("HERMES_HOME")
+    runtime = get_tencent_runtime()
+    runtime.stop(home, disable=True)
+    state = runtime.status(home)
+    print("Jarvis stopped.")
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_command(raw_args: str) -> Optional[str]:
+    action = raw_args.strip().lower() or "status"
+    return _jarvis_runtime({"action": action})
+
+
+def register(ctx: Any) -> None:
+    """Register Jarvis with Hermes without starting services during plugin discovery."""
+    ctx.register_hook("on_session_start", _on_session_start)
+    ctx.register_hook("pre_llm_call", _on_pre_llm_call)
+    ctx.register_hook("post_tool_call", _on_post_tool_call)
+    ctx.register_hook("subagent_stop", _on_subagent_stop)
+    ctx.register_hook("on_session_end", _on_session_end)
+    ctx.register_tool(name="jarvis_orchestrate", toolset="jarvis", schema=_ORCHESTRATE_SCHEMA,
+                      handler=_jarvis_orchestrate,
+                      description="Analyse a goal and recommend how Hermes should organise its existing workforce.")
+    ctx.register_tool(name="jarvis_record_outcome", toolset="jarvis", schema=_RECORD_OUTCOME_SCHEMA,
+                      handler=_jarvis_record_outcome,
+                      description="Record a completed work outcome so Jarvis can learn from it.")
+    ctx.register_tool(name="jarvis_runtime", toolset="jarvis", schema=_RUNTIME_SCHEMA,
+                      handler=_jarvis_runtime,
+                      description="Start, stop, or inspect Jarvis-owned TencentDB and Ollama services.")
+    if hasattr(ctx, "register_command"):
+        ctx.register_command(
+            "jarvis",
+            handler=_handle_command,
+            description="Manage Jarvis-owned TencentDB and Ollama services.",
+            args_hint="<status|start|stop>",
+        )
+    if hasattr(ctx, "register_cli_command"):
+        ctx.register_cli_command(
+            name="start",
+            help="Start a Hermes extension",
+            setup_fn=_setup_jarvis_start,
+            handler_fn=_handle_jarvis_start,
+            description="Start the Jarvis plugin and its Jarvis-owned TencentDB/Ollama runtime.",
+        )
+        ctx.register_cli_command(
+            name="stop",
+            help="Stop a Hermes extension",
+            setup_fn=_setup_jarvis_stop,
+            handler_fn=_handle_jarvis_stop,
+            description="Stop the Jarvis plugin's owned TencentDB/Ollama runtime without stopping Hermes.",
+        )
 
 
 __all__ = ["JarvisPluginRuntime", "register"]
