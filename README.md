@@ -1,0 +1,81 @@
+# 🧠 Jarvis Memory for Hermes Agent (v4.0.0)
+
+Turn your Hermes Agent into a fully autonomous, self-evolving AI assistant with persistent memory and intelligent workflow management. 
+
+Designed for commercial use, Jarvis Memory installs as a "Zero-Config" Model Context Protocol (MCP) server. It automatically provisions its own local AI infrastructure (via Ollama) and local databases, meaning **zero cloud costs and 100% data privacy.**
+
+---
+
+## ✨ Premium Features
+
+### 🔄 Lemon AI-Style Self-Evolution
+Jarvis learns from every mistake. 
+* **Tool Tracking:** Automatically identifies which tools fail and which succeed.
+* **Pre-Computation:** Before Hermes starts a new task, Jarvis recalls past lessons to warn the agent against using known-bad approaches.
+* **Success Analytics:** Cross-workflow analysis computes exact success rates for your bots.
+
+### 🚀 Autonomous Workflow Management (OpenWorker Style)
+* **Intelligent Auto-Replanning:** If a step fails, Jarvis doesn't crash. It automatically isolates the failure, lowers confidence, and forces Hermes to retry with an alternative approach.
+* **Stall Detection:** Background watchdogs detect if Hermes is stuck in an infinite loop and marks the workflow for cancellation.
+* **Crash Recovery:** Workflows are written to an ultra-fast local SQLite WAL database. If your computer crashes, Hermes picks up exactly where it left off.
+
+### 📊 Visual Dashboards & Progress
+Jarvis renders beautiful text-based UIs directly in your chat:
+* **Kanban Boards:** `TODO | IN PROGRESS | DONE | FAILED`
+* **Real-time Progress Bars:** `█████████░░░ 75%`
+* **Mermaid Flowcharts:** Visual plan previews color-coded by risk.
+
+### 🧠 Deep Persistent Memory
+* **TencentDB Gateway:** Jarvis automatically summarizes messy conversations into clean, searchable atomic facts.
+* **Per-Bot Separation:** Every Hermes bot (e.g., Coder Bot, Video Editor Bot) gets its own isolated memory profile.
+
+---
+
+## 🛠️ Zero-Config Installation
+
+You do not need to configure API keys or set up databases. Jarvis handles it all.
+
+### Prerequisites
+1. Python 3.9+
+2. [Ollama](https://ollama.com/) (Must be installed on your machine for the zero-config local AI to work)
+
+### Install
+
+```bash
+# Install the package
+pip install jarvis-memory
+
+# Start the server (Orchestrator will auto-pull models and boot infrastructure)
+jarvis-server
+```
+
+When you run `jarvis-server`, the Orchestrator will automatically:
+1. Boot Ollama in the background.
+2. Download the `kinfra-text-embedding-0.6b` and `llama3.2:1b` models.
+3. Boot the Memory Gateway.
+4. Launch the MCP Server on `stdio`.
+
+### Connect to Hermes
+
+Add this to your Hermes MCP configuration file:
+
+```json
+{
+  "mcpServers": {
+    "jarvis": {
+      "command": "jarvis-server",
+      "args": []
+    }
+  }
+}
+```
+
+---
+
+## 🔒 Security & Privacy
+* **100% Local:** No data is ever sent to OpenAI, Anthropic, or any cloud provider. All memory extraction is done locally via Ollama.
+* **Human-in-the-Loop:** High-risk tasks are automatically paused by Jarvis, requiring your explicit approval before Hermes can execute them.
+* **No Key Routing:** Jarvis does not require your Hermes API keys. It tracks the logic, while Hermes executes the tasks.
+
+## 📝 License
+Proprietary / Commercial. All rights reserved.

@@ -1,0 +1,2 @@
+[console_scripts]
+jarvis-server = jarvis_memory.orchestrator:main
