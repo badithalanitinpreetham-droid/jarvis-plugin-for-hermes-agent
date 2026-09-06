@@ -67,15 +67,15 @@ class OSAssistant:
                 return f"Volume set to {vol}%"
                 
             elif action == "mute":
-                subprocess.run(["osascript", "-e", "set volume with output muted"], check=True)
+                subprocess.run(["osascript", "-e", "set volume with output muted"], check=True, capture_output=True, text=True)
                 return "System muted"
                 
             elif action == "unmute":
-                subprocess.run(["osascript", "-e", "set volume without output muted"], check=True)
+                subprocess.run(["osascript", "-e", "set volume without output muted"], check=True, capture_output=True, text=True)
                 return "System unmuted"
                 
             elif action == "lock_screen":
-                subprocess.run(["pmset", "displaysleepnow"], check=True)
+                subprocess.run(["pmset", "displaysleepnow"], check=True, capture_output=True, text=True)
                 return "Screen locked/sleeping"
                 
             elif action == "play_pause_media":
@@ -90,7 +90,7 @@ class OSAssistant:
                     end try
                 end try
                 '''
-                subprocess.run(["osascript", "-e", script], check=True, stderr=subprocess.PIPE)
+                subprocess.run(["osascript", "-e", script], check=True, capture_output=True, text=True)
                 return "Toggled play/pause (Targeting Spotify/Music)"
                 
             else:
