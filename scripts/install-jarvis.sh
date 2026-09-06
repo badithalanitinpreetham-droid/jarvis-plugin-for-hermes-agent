@@ -15,15 +15,22 @@ echo
 cat <<'EOF'
 Jarvis is installed in the current Python environment.
 
-Hermes plugin:
+Enable the native Hermes plugin:
   hermes plugins enable jarvis
 
-Jarvis memory provider:
+Select Jarvis as the Hermes memory provider:
   hermes config set memory.provider jarvis
+
+Start Jarvis and its owned local services:
+  hermes start jarvis
+
+Stop Jarvis and its owned local services:
+  hermes stop jarvis
 
 TencentDB Agent Memory source is pinned under:
   vendor/TencentDB-Agent-Memory
 
-Note: source provisioning does not start MemoryCore/Hub/Proxy automatically.
-Use the bundled Tencent deployment files when you want the local services running.
+The Tencent source is provisioned once and reused. Jarvis owns the runtime
+lifecycle; no separate start-all.sh or `ollama serve` command is required for
+normal operation.
 EOF
