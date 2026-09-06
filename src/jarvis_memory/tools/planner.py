@@ -161,11 +161,14 @@ Output ONLY valid JSON in this format:
 
         try:
             # Search for workflow reflections related to this goal
-            memories = self.memory_engine.search_memory(
-                profile_id,
-                f"workflow reflection lesson: {goal}",
-                limit=5,
-            )
+            query = f"workflow reflection lesson: {goal}"
+            if hasattr(self.memory_engine, "search_memory"):
+                memories = self.memory_engine.search_memory(profile_id, query, limit=5)
+            elif hasattr(self.memory_engine, "recall"):
+                memories = self.memory_engine.recall(profile_id, query, limit=5)
+            else:
+                return []
+                
             if not memories:
                 return []
 
