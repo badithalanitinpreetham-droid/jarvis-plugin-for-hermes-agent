@@ -119,9 +119,12 @@ class TencentMemoryClient:
 
     def health(self) -> bool:
         try:
-            self._request("GET", "/health")
-            return True
-        except (MemoryGatewayError, CircuitBreakerOpen):
+            resp = self._client.get(f"{self.base_url}/health", headers=self._headers(), timeout=2.0)
+            if resp.status_code == 200:
+                self._record_success()
+                return True
+            return False
+        except httpx.HTTPError:
             return False
 
     def status(self) -> Dict[str, Any]:
