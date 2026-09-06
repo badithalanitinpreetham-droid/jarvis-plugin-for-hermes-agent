@@ -1,10 +1,12 @@
 """Jarvis intelligence: routing, workforce scoring, deliverable detection and learning."""
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from .evolution import EvolutionEngine
 from .experience_store import ExperienceStore
 
 
@@ -35,11 +37,12 @@ class RoutingDecision:
 
 
 class JarvisIntelligence:
-    """Pure decision layer. It recommends work organisation; Hermes performs execution."""
+    """Decision layer. Jarvis recommends; Hermes owns worker/tool execution."""
 
     def __init__(self, registry: Any = None, store: Optional[ExperienceStore] = None) -> None:
         self.registry = registry
         self.store = store or ExperienceStore()
+        self.evolution = EvolutionEngine(self.store)
 
     @staticmethod
     def classify(goal: str) -> RoutingDecision:
@@ -66,11 +69,32 @@ class JarvisIntelligence:
     def _tokens(text: str) -> set[str]:
         return {x for x in re.findall(r"[a-z0-9][a-z0-9+_.-]{2,}", text.lower())}
 
+    def _bot_performance(self) -> Dict[str, float]:
+        stats: Dict[str, List[int]] = {}
+        for row in self.store.recent(limit=50):
+            try:
+                bots = json.loads(row.get("bots") or "[]")
+            except (TypeError, ValueError):
+                bots = []
+            if not isinstance(bots, list):
+                continue
+            outcome = 1 if row.get("status") == "success" else 0
+            for bot in bots:
+                name = str(bot).strip()
+                if name:
+                    bucket = stats.setdefault(name, [0, 0])
+                    bucket[0] += outcome
+                    bucket[1] += 1
+        return {name: success / total for name, (success, total) in stats.items() if total}
+
     def rank_bots(self, goal: str, bots: Sequence[Dict[str, Any]], roles: Iterable[str]) -> List[Dict[str, Any]]:
         goal_tokens = self._tokens(goal)
         role_tokens = self._tokens(" ".join(roles))
+        performance_map = self._bot_performance()
         scored: List[tuple[float, Dict[str, Any]]] = []
         for bot in bots:
+            bot_id = str(bot.get("id", bot.get("name", "")))
+            bot_name = str(bot.get("name", bot_id))
             blob = " ".join(
                 str(bot.get(key, ""))
                 for key in ("name", "role", "description", "capabilities", "skills", "toolsets")
@@ -78,10 +102,17 @@ class JarvisIntelligence:
             bot_tokens = self._tokens(blob)
             overlap = len(goal_tokens & bot_tokens)
             role_overlap = len(role_tokens & bot_tokens)
-            performance = float(bot.get("performance", bot.get("success_rate", 0.0)) or 0.0)
-            available = 0.1 if bot.get("available", bot.get("configured", True)) else -1.0
-            score = overlap * 0.8 + role_overlap * 1.2 + performance * 2.0 + available
-            scored.append((score, {**bot, "jarvis_score": round(score, 3)}))
+            measured = performance_map.get(bot_name, performance_map.get(bot_id, 0.0))
+            declared = float(bot.get("performance", bot.get("success_rate", 0.0)) or 0.0)
+            performance = max(0.0, min(1.0, max(measured, declared)))
+            configured = bot.get("configured", bot.get("available", True))
+            availability = 0.1 if configured else -1.0
+            score = overlap * 0.8 + role_overlap * 1.2 + performance * 2.0 + availability
+            scored.append((score, {
+                **bot,
+                "performance": round(performance, 3),
+                "jarvis_score": round(score, 3),
+            }))
         scored.sort(key=lambda pair: (-pair[0], str(pair[1].get("id", pair[1].get("name", "")))))
         return [bot for _, bot in scored]
 
@@ -91,9 +122,8 @@ class JarvisIntelligence:
         lessons: List[str] = []
         for row in recent:
             try:
-                import json
                 lessons.extend(json.loads(row.get("lessons") or "[]"))
-            except Exception:
+            except (TypeError, ValueError):
                 continue
         bots: List[Dict[str, Any]] = []
         if self.registry is not None:
@@ -102,12 +132,14 @@ class JarvisIntelligence:
             except Exception:
                 bots = []
         ranked = self.rank_bots(goal, bots, decision.suggested_roles)
+        evolution = self.evolution.render_for_context(goal)
         return {
             "routing": decision.__dict__,
             "profile_id": profile_id,
-            "recommended_bots": ranked[: max(1, min(len(ranked), 6))],
+            "recommended_bots": ranked[:6],
             "experience": recent[:limit],
             "lessons": lessons[:10],
+            "self_evolution": evolution,
         }
 
     def observe_outcome(self, *, goal: str, status: str, profile_id: str = "", session_id: str = "",
@@ -122,8 +154,7 @@ class JarvisIntelligence:
         )
 
     def evolve_policy(self, key: str, *, success: bool, proposal: str, confidence: float = 0.6) -> Dict[str, Any]:
-        """Evidence-gated evolution record; callers decide when a proposal is safe to adopt."""
-        return self.store.record_policy_result(key, success=success, value=proposal, confidence=confidence)
+        return self.evolution.record_trial(key, proposal, success=success, confidence=confidence)
 
     def close(self) -> None:
         self.store.close()
