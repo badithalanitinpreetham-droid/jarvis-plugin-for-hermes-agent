@@ -32,7 +32,7 @@ class GatewaySupervisor:
         self.start_cmd = start_cmd
         self.auto_start = bool(start_cmd) if auto_start is None else bool(auto_start and start_cmd)
         self.autonomous_executor = autonomous_executor
-        self._planner = planner
+        self._planner = planner or getattr(autonomous_executor, "planner", None)
         self._proc: Optional[subprocess.Popen] = None
         self._we_own_process = False
         self._stop_event = threading.Event()
@@ -78,7 +78,7 @@ class GatewaySupervisor:
             return
         kwargs = {"start_new_session": True} if sys.platform != "win32" else {}
         cwd = CONFIG.gateway_cwd or os.environ.get("GATEWAY_CWD") or None
-        logger.info("Spawning MemoryCore Gateway: %s", " ".join(self.start_cmd))
+        logger.info("Spawning MemoryCore Gateway process")
         try:
             self._proc = subprocess.Popen(
                 self.start_cmd,
@@ -197,8 +197,6 @@ class GatewaySupervisor:
                     return
                 self._last_telemetry_trigger = time.monotonic()
                 if self.autonomous_executor:
-                    # Use an actually exposed Jarvis telemetry tool. Do not
-                    # invent a low-level process-control action here.
                     plan = {
                         "goal": "Diagnose system overload safely",
                         "steps": [{
