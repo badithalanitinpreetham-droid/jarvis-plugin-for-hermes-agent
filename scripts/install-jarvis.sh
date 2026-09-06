@@ -19,16 +19,14 @@ if command -v hermes >/dev/null 2>&1; then
 fi
 
 # Hermes plugins expose plugin-scoped CLI commands (`hermes jarvis start`).
-# Install a tiny user-level compatibility front-end so the requested command
-# shape (`hermes start jarvis` / `hermes stop jarvis`) works without modifying
-# Hermes itself or duplicating Jarvis lifecycle logic.
-SHIM_DIR="$HOME/.local/bin"
+# Install a tiny compatibility front-end in a dedicated Jarvis-owned
+# directory. Never overwrite the real Hermes executable.
+SHIM_DIR="$HOME/.hermes/bin"
 SHIM_PATH="$SHIM_DIR/hermes"
 mkdir -p "$SHIM_DIR"
 cp "$ROOT/scripts/hermes-jarvis-shim.sh" "$SHIM_PATH"
 chmod +x "$SHIM_PATH"
 
-PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
 add_path_block() {
   local rc_file="$1"
   [[ -f "$rc_file" ]] || touch "$rc_file"
@@ -36,7 +34,7 @@ add_path_block() {
     cat >> "$rc_file" <<'EOF'
 
 # >>> jarvis-hermes-shim >>>
-export PATH="$HOME/.local/bin:$PATH"
+export PATH="$HOME/.hermes/bin:$PATH"
 # <<< jarvis-hermes-shim <<<
 EOF
   fi
@@ -75,8 +73,12 @@ Requested compatibility lifecycle:
   hermes start jarvis
   hermes stop jarvis
 
-The compatibility form is a thin user-level wrapper. All other Hermes
-commands are passed unchanged to the real Hermes executable.
+The compatibility form is a thin user-level wrapper installed at:
+  ~/.hermes/bin/hermes
+
+It translates only the two Jarvis lifecycle forms into the native plugin
+commands. Every other Hermes command is passed unchanged to the real Hermes
+executable, which is never overwritten.
 
 When Jarvis starts, it automatically:
   1. Reuses or provisions the pinned TencentDB Agent Memory source.
@@ -100,7 +102,4 @@ TencentDB source is kept under:
 
 macOS launchd service:
   ~/Library/LaunchAgents/com.jarvis.hermes-runtime.plist
-
-The compatibility shim is installed at:
-  ~/.local/bin/hermes
 EOF
