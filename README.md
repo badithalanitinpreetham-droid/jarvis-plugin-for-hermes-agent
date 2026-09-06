@@ -30,6 +30,24 @@ HERMES NATIVE EXECUTION
 
 Jarvis does not create a second model loop, tool runtime, Bot framework, or Kanban system. Hermes continues to own those capabilities.
 
+## Hermes skill package
+
+This repository provides a dedicated Hermes-facing administrator skill at:
+
+```text
+hermes-skill/SKILL.md
+```
+
+Use that skill when Hermes needs to reason about Jarvis installation, start/stop lifecycle, diagnostics, ownership, TencentDB/Ollama configuration, macOS `launchd` supervision, recovery, and safe removal. It describes Jarvis as a native Hermes extension and explicitly prevents Hermes from treating `jarvis-server` as the normal architecture.
+
+A second implementation-oriented runtime skill is available at:
+
+```text
+skills/jarvis/SKILL.md
+```
+
+The two skills are intentionally aligned: `hermes-skill/SKILL.md` is the Hermes operator/administrator guidance, while `skills/jarvis/SKILL.md` is the runtime integration guidance maintained with the plugin code.
+
 ## Install
 
 Recommended Git plugin install:
@@ -47,7 +65,7 @@ cd jarvis-plugin-for-hermes-agent
 ./scripts/install-jarvis.sh
 ```
 
-When the `hermes` command is available, the source installer attempts to enable Jarvis and select `memory.provider=jarvis`. The Hermes-facing administrator skill is provided at `hermes-skill/SKILL.md`.
+When the `hermes` command is available, the source installer attempts to enable Jarvis and select `memory.provider=jarvis`.
 
 ## Start and stop Jarvis
 
@@ -176,7 +194,7 @@ If one or more TencentDB services become unreachable, the supervisor asks Jarvis
 hermes stop jarvis
 ```
 
-unloads the `launchd` service first, disables the persisted runtime state, and then stops only Jarvis-owned services. This prevents the supervisor from immediately bringing the stack back after an intentional shutdown.
+unloads the `launchd` service, disables the persisted runtime state, and then stops only Jarvis-owned services. This prevents the supervisor from immediately bringing the stack back after an intentional shutdown.
 
 ### Manual watchdog status
 
