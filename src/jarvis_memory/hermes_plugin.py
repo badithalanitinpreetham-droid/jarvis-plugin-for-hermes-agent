@@ -1,8 +1,10 @@
 """Native Hermes plugin facade for Jarvis intelligence and owned local services."""
 from __future__ import annotations
 
+import argparse
 import atexit
 import json
+import os
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -98,6 +100,8 @@ class JarvisPluginRuntime:
 
     def close(self) -> None:
         with self._lock:
+            if not self._started:
+                return
             try:
                 if self._intelligence is not None:
                     self._intelligence.close()
@@ -108,8 +112,7 @@ class JarvisPluginRuntime:
                 self._store = None
                 self._intelligence = None
                 self._home = None
-                if self._services is not None:
-                    self._services.close()
+                self._services.close()
                 self._started = False
 
 
@@ -173,23 +176,31 @@ def _jarvis_runtime(arguments: Dict[str, Any], **kwargs: Any) -> str:
         _RUNTIME.close()
     elif action != "status":
         return json.dumps({"error": "action must be status, start, or stop"})
-    return json.dumps(_RUNTIME._services.status(), ensure_ascii=False)
+    return json.dumps(_RUNTIME._services.status(kwargs.get("hermes_home")), ensure_ascii=False)
 
 
-_ORCHESTRATE_SCHEMA = {
-    "type": "object", "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}}, "required": ["goal"],
-}
-_RUNTIME_SCHEMA = {
-    "type": "object", "properties": {"action": {"type": "string", "enum": ["status", "start", "stop"]}},
-}
-_RECORD_OUTCOME_SCHEMA = {
-    "type": "object", "properties": {
-        "goal": {"type": "string"}, "status": {"type": "string", "enum": ["success", "failed", "partial"]},
-        "profile_id": {"type": "string"}, "session_id": {"type": "string"}, "strategy": {"type": "string"},
-        "bots": {"type": "array", "items": {"type": "string"}}, "deliverable": {"type": "string"},
-        "quality": {"type": "number"}, "evidence": {"type": "object"}, "lessons": {"type": "array", "items": {"type": "string"}},
-    }, "required": ["goal"],
-}
+def _setup_jarvis_start(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("target", choices=["jarvis"], help="Start Jarvis and its owned local services")
+
+
+def _setup_jarvis_stop(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("target", choices=["jarvis"], help="Stop Jarvis and its owned local services")
+
+
+def _handle_jarvis_start(args: argparse.Namespace) -> int:
+    get_tencent_runtime().start(os.environ.get("HERMES_HOME"), force=True)
+    state = get_tencent_runtime().status(os.environ.get("HERMES_HOME"))
+    print("Jarvis started.")
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
+
+
+def _handle_jarvis_stop(args: argparse.Namespace) -> int:
+    get_tencent_runtime().stop(os.environ.get("HERMES_HOME"), disable=True)
+    state = get_tencent_runtime().status(os.environ.get("HERMES_HOME"))
+    print("Jarvis stopped.")
+    print(json.dumps(state, indent=2, sort_keys=True))
+    return 0
 
 
 def _handle_command(raw_args: str) -> Optional[str]:
@@ -198,8 +209,7 @@ def _handle_command(raw_args: str) -> Optional[str]:
 
 
 def register(ctx: Any) -> None:
-    """Register Jarvis with Hermes and start Jarvis-owned local services."""
-    _RUNTIME.start()
+    """Register Jarvis with Hermes without starting services during CLI discovery."""
     ctx.register_hook("on_session_start", _on_session_start)
     ctx.register_hook("pre_llm_call", _on_pre_llm_call)
     ctx.register_hook("post_tool_call", _on_post_tool_call)
@@ -216,6 +226,36 @@ def register(ctx: Any) -> None:
                       description="Start, stop, or inspect Jarvis-owned TencentDB and Ollama services.")
     ctx.register_command("jarvis", handler=_handle_command,
                          description="Manage Jarvis-owned TencentDB and Ollama services.", args_hint="<status|start|stop>")
+    ctx.register_cli_command(
+        name="start",
+        help="Start a Hermes extension",
+        setup_fn=_setup_jarvis_start,
+        handler_fn=_handle_jarvis_start,
+        description="Start the Jarvis plugin and its Jarvis-owned TencentDB/Ollama runtime.",
+    )
+    ctx.register_cli_command(
+        name="stop",
+        help="Stop a Hermes extension",
+        setup_fn=_setup_jarvis_stop,
+        handler_fn=_handle_jarvis_stop,
+        description="Stop the Jarvis plugin's owned TencentDB/Ollama runtime without stopping Hermes.",
+    )
+
+
+_ORCHESTRATE_SCHEMA = {
+    "type": "object", "properties": {"goal": {"type": "string"}, "profile_id": {"type": "string"}}, "required": ["goal"],
+}
+_RUNTIME_SCHEMA = {
+    "type": "object", "properties": {"action": {"type": "string", "enum": ["status", "start", "stop"]}},
+}
+_RECORD_OUTCOME_SCHEMA = {
+    "type": "object", "properties": {
+        "goal": {"type": "string"}, "status": {"type": "string", "enum": ["success", "failed", "partial"]},
+        "profile_id": {"type": "string"}, "session_id": {"type": "string"}, "strategy": {"type": "string"},
+        "bots": {"type": "array", "items": {"type": "string"}}, "deliverable": {"type": "string"},
+        "quality": {"type": "number"}, "evidence": {"type": "object"}, "lessons": {"type": "array", "items": {"type": "string"}},
+    }, "required": ["goal"],
+}
 
 
 __all__ = ["JarvisPluginRuntime", "register"]
