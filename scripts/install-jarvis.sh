@@ -11,26 +11,38 @@ fi
 "$ROOT/scripts/jarvis-tencent-memory.sh"
 python3 -m pip install -e "$ROOT"
 
+# Complete the Hermes integration when this installer is run inside a Hermes
+# environment. Installation still succeeds when Hermes is not installed yet.
+if command -v hermes >/dev/null 2>&1; then
+  hermes plugins enable jarvis >/dev/null 2>&1 || true
+  hermes config set memory.provider jarvis >/dev/null 2>&1 || true
+fi
+
 echo
 cat <<'EOF'
 Jarvis is installed in the current Python environment.
 
-Enable the native Hermes plugin:
-  hermes plugins enable jarvis
-
-Select Jarvis as the Hermes memory provider:
-  hermes config set memory.provider jarvis
-
-Start Jarvis and its owned local services:
+Primary lifecycle:
   hermes start jarvis
-
-Stop Jarvis and its owned local services:
   hermes stop jarvis
 
-TencentDB Agent Memory source is pinned under:
-  vendor/TencentDB-Agent-Memory
+Normal Hermes usage:
+  hermes
 
-The Tencent source is provisioned once and reused. Jarvis owns the runtime
-lifecycle; no separate start-all.sh or `ollama serve` command is required for
-normal operation.
+When Jarvis starts, it automatically:
+  1. Reuses or provisions the pinned TencentDB Agent Memory source.
+  2. Starts Ollama if Ollama is not already running.
+  3. Pulls the Jarvis/Tencent local models if they are missing.
+  4. Configures Tencent memory-core, memory-hub and proxy to use Ollama.
+  5. Starts the TencentDB services.
+
+Default local models:
+  Memory/LLM: qwen3.5:4b
+  Embeddings: snowflake-arctic-embed2
+
+Model files remain installed in Ollama after `hermes stop jarvis`.
+Jarvis stops only the Ollama server process that Jarvis itself started.
+
+TencentDB source is kept under:
+  ~/.hermes/.jarvis/tencentdb/source
 EOF
