@@ -87,7 +87,7 @@ hermes start jarvis
 hermes stop jarvis
 ```
 
-The compatibility form is a thin front-end at `~/.local/bin/hermes`. It translates only these two Jarvis lifecycle commands into the native plugin form and passes every other Hermes command unchanged to the real Hermes executable. This avoids patching Hermes core and keeps one implementation of the Jarvis lifecycle.
+The compatibility form is a thin front-end installed at `~/.hermes/bin/hermes`. It translates only these two Jarvis lifecycle commands into the native plugin form and passes every other Hermes command unchanged to the real Hermes executable. It never overwrites the real Hermes executable.
 
 `hermes start jarvis` is therefore a convenience compatibility entry point, while `hermes jarvis start` is the direct Hermes-plugin command.
 
@@ -259,7 +259,7 @@ hermes jarvis status
 hermes jarvis stop
 ```
 
-After a fresh shell (so `~/.local/bin` is on PATH), also verify the requested compatibility form:
+After a fresh shell (so `~/.hermes/bin` is on PATH), also verify the requested compatibility form:
 
 ```bash
 hermes start jarvis
