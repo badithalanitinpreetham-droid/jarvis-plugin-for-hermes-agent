@@ -76,12 +76,7 @@ class TestTencentRuntime(unittest.TestCase):
             runtime = TencentRuntime()
             with patch.object(runtime, "_process_command", return_value="ollama serve"), \
                  patch.object(runtime, "_port_open", return_value=True), \
-                 patch.object(runtime, "_ollama_model_available", return_value=True), \
-                 patch.object(runtime, "_ensure_ollama_source", create=True), \
-                 patch.object(runtime, "_ensure_tencent_source", return_value=home / ".jarvis" / "tencentdb" / "source"):
-                # _start_ollama only needs to demonstrate ownership preservation here.
-                root = home / ".jarvis" / "tencentdb" / "source"
-                (root / "deploy" / "global-images").mkdir(parents=True)
+                 patch.object(runtime, "_ollama_model_available", return_value=True):
                 runtime._start_ollama(home, DEFAULT_OLLAMA_MODEL, DEFAULT_EMBEDDING_MODEL, runtime._load_state(home))
             self.assertTrue(runtime._ollama_owned)
 
