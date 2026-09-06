@@ -5,13 +5,14 @@ import argparse
 import atexit
 import json
 import os
+import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from .experience_store import ExperienceStore
 from .intelligence import JarvisIntelligence
-from .macos_supervisor import install as install_macos_supervisor, uninstall as uninstall_macos_supervisor
+from .macos_supervisor import install as install_macos_supervisor, status as macos_supervisor_status, uninstall as uninstall_macos_supervisor
 from .orchestration.registry import HermesRegistry
 from .tencent_runtime import TencentRuntime, get_tencent_runtime
 
@@ -40,16 +41,6 @@ class JarvisPluginRuntime:
             self._registry = HermesRegistry(root=requested)
             self._store = ExperienceStore(str(requested / ".jarvis" / "experience.db"))
             self._intelligence = JarvisIntelligence(self._registry, self._store)
-            # Normal Hermes hook startup gets the watchdog only when local runtime
-            # autostart is enabled. Explicit `hermes start jarvis` installs it even
-            # when JARVIS_TENCENT_AUTOSTART=0.
-            autostart = os.environ.get("JARVIS_TENCENT_AUTOSTART", "1").lower()
-            if autostart not in {"0", "false", "no"}:
-                try:
-                    install_macos_supervisor(str(requested))
-                except Exception:
-                    # Core Hermes/Jarvis operation remains usable if launchd is unavailable.
-                    pass
             self._started = True
 
     @staticmethod
@@ -121,7 +112,15 @@ class JarvisPluginRuntime:
                 self._store = None
                 self._intelligence = None
                 self._home = None
-                if self._services is not None:
+                # On macOS, the launchd supervisor owns the persistent local runtime.
+                # Do not tear down services simply because the Hermes process exits.
+                launchd_loaded = False
+                if sys.platform == "darwin":
+                    try:
+                        launchd_loaded = bool(macos_supervisor_status().get("loaded"))
+                    except Exception:
+                        launchd_loaded = False
+                if self._services is not None and not launchd_loaded:
                     self._services.stop()
                 self._started = False
 
@@ -220,7 +219,8 @@ def _handle_jarvis_start(args: argparse.Namespace) -> int:
     try:
         install_macos_supervisor(home)
     except Exception as exc:
-        print(f"Warning: macOS launchd supervisor could not be installed: {exc}")
+        if sys.platform == "darwin":
+            print(f"Warning: macOS launchd supervisor could not be installed: {exc}")
     state = runtime.status(home)
     print("Jarvis started.")
     print(json.dumps(state, indent=2, sort_keys=True))
@@ -232,7 +232,8 @@ def _handle_jarvis_stop(args: argparse.Namespace) -> int:
     try:
         uninstall_macos_supervisor()
     except Exception as exc:
-        print(f"Warning: macOS launchd supervisor could not be unloaded: {exc}")
+        if sys.platform == "darwin":
+            print(f"Warning: macOS launchd supervisor could not be unloaded: {exc}")
     runtime = get_tencent_runtime()
     runtime.stop(home, disable=True)
     state = runtime.status(home)
