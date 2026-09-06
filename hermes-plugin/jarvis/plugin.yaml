@@ -1,0 +1,12 @@
+name: jarvis
+version: 5.0.0
+description: Jarvis intelligence, organisational memory, workforce routing, experience learning and self-evolution for Hermes Agent
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - post_tool_call
+  - subagent_stop
+  - on_session_end
+provides_tools:
+  - jarvis_orchestrate
+  - jarvis_record_outcome
