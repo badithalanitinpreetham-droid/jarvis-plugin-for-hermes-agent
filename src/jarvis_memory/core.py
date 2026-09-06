@@ -107,6 +107,11 @@ class JarvisEngine:
         matches = list(role_pattern.finditer(transcript))
 
         if matches:
+            if matches[0].start() > 0:
+                preceding = transcript[:matches[0].start()].strip()
+                if preceding:
+                    turns.append({"role": "system", "content": preceding})
+                    
             for i, match in enumerate(matches):
                 raw_role = match.group(1).lower()
                 if raw_role in ("user", "human"):

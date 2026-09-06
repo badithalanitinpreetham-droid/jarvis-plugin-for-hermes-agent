@@ -473,14 +473,24 @@ async def call_tool(name: str, arguments: dict) -> List[types.TextContent]:
                 history=state.get("history", []),
             )
             
-            if not planner._validate_plan(new_plan):
-                return [types.TextContent(type="text", text=json.dumps({"error": "Replanning produced an invalid plan"}))]
+            from .tools.autonomous import validate_plan
+            err = validate_plan(new_plan)
+            if err:
+                return [types.TextContent(type="text", text=json.dumps({"error": f"Replanning produced an invalid plan: {err}"}))]
 
             # Apply the new plan
             state["plan"] = new_plan
-            state["next_index"] = 0
+            
+            # Calculate next_index based on first incomplete step
+            next_idx = 0
+            for i, s in enumerate(new_plan.get("steps", [])):
+                if s.get("id") not in state.get("completed_steps", []):
+                    next_idx = i
+                    break
+                    
+            state["next_index"] = next_idx
             state["approved_index"] = None
-            state["completed_steps"] = []
+            # Retain completed_steps to prevent amnesia
             state["failed_steps"] = []
             state["archived_history"] = state.get("archived_history", []) + state.get("history", [])
             state["history"] = []
