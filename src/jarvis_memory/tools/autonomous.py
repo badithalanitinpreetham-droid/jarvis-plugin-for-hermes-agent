@@ -1,34 +1,16 @@
-"""Workflow state machine — client-driven step protocol.
+"""Robust, client-driven autonomous workflow state machine.
 
-Production hardening over the previous version:
-- State is persisted via WorkflowStore (SQLite), not just an in-memory
-  dict — a killed/restarted process resumes in-flight workflows instead
-  of losing them. `active_workflows` is now a warm cache backed by the
-  store, not the source of truth.
-- start_workflow() is idempotent: calling it twice with the same
-  workflow_id (e.g. a cron tick retried after a timeout) resumes the
-  existing run instead of silently resetting progress.
-- Steps can carry a `dedupe_key` (e.g. a content slug about to be
-  published). Once a step with that key has been reported successful,
-  it is never handed back to Hermes again for any workflow — protects
-  against a crash-and-restart replaying a publish action that already
-  went through.
-- Plan structure is validated before a workflow starts, with a clear
-  error instead of an IndexError/KeyError three calls later.
-- Auto-replan: when a step fails and replan_count < max, the planner
-  automatically generates a revised plan and continues execution.
-- Workflow cancellation: stale or unwanted workflows can be cancelled.
-- Stall detection: steps with no report after a timeout are flagged.
-
-Still true from before: this module executes nothing itself. A server
-has no way to reach back and invoke tools that live on the client
-(Hermes). Only report_step_result(), called by Hermes after it actually
-did the work, ever marks a step successful.
+Jarvis is the workflow/state layer; Hermes remains responsible for actually
+executing tools. This module is deliberately conservative about idempotency,
+approval, replanning, persistence and race-group semantics.
 """
+from __future__ import annotations
 
 import logging
-from typing import Dict, Any, Optional, List
+import re
+import threading
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from ..config import CONFIG
 from ..workflow_store import WorkflowStore
@@ -36,75 +18,117 @@ from ..workflow_store import WorkflowStore
 logger = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = {"completed", "completed_with_failures", "failed", "cancelled"}
+ACTIVE_STATUSES = {"running", "ready_to_execute", "awaiting_approval"}
+VALID_RESULT_STATUSES = {"success", "failed"}
 
 
-def validate_plan(plan: Dict) -> Optional[str]:
-    """Returns an error string if the plan is malformed, else None."""
+def validate_plan(plan: Dict[str, Any]) -> Optional[str]:
     if not isinstance(plan, dict):
         return "plan must be an object"
-    if "steps" not in plan or not isinstance(plan["steps"], list):
-        return "plan.steps must be a list"
-    if not plan["steps"]:
-        return "plan.steps must not be empty"
-    for i, step in enumerate(plan["steps"]):
+    steps = plan.get("steps")
+    if not isinstance(steps, list) or not steps:
+        return "plan.steps must be a non-empty list"
+
+    seen: set[str] = set()
+    valid_risks = {"low", "medium", "high"}
+    for i, step in enumerate(steps):
         if not isinstance(step, dict):
             return f"step {i} must be an object"
-        for required_key in ("id", "action", "confidence", "risk"):
-            if required_key not in step:
-                return f"step {i} missing required field '{required_key}'"
+        for key in ("id", "action", "confidence", "risk"):
+            if key not in step:
+                return f"step {i} missing required field '{key}'"
+        if step["id"] is None or str(step["id"]) == "":
+            return f"step {i} has an empty id"
+        sid = str(step["id"])
+        if sid in seen:
+            return f"duplicate step id '{step['id']}'"
+        seen.add(sid)
+        if not isinstance(step["action"], str) or not step["action"].strip():
+            return f"step {i} action must be a non-empty string"
+        try:
+            confidence = float(step["confidence"])
+        except (TypeError, ValueError):
+            return f"step {i} confidence must be numeric"
+        if not 0.0 <= confidence <= 1.0:
+            return f"step {i} confidence must be between 0 and 1"
+        if str(step["risk"]).lower() not in valid_risks:
+            return f"step {i} risk must be one of {sorted(valid_risks)}"
     return None
 
 
 class AutonomousExecutor:
-    """Tracks workflow state and gates steps by confidence/risk. Executes nothing itself."""
+    """Persisted workflow state machine. It never executes Hermes tools itself."""
 
-    def __init__(self, memory_engine=None, config: Dict = None, store: Optional[WorkflowStore] = None,
-                 planner=None):
+    def __init__(self, memory_engine=None, config: Optional[Dict[str, Any]] = None,
+                 store: Optional[WorkflowStore] = None, planner=None):
+        cfg = config or {}
         self.memory_engine = memory_engine
-        self.config = config or {}
-        self.auto_approve_confidence = self.config.get("auto_approve_confidence", CONFIG.auto_approve_confidence)
-        self.replan_max_retries = self.config.get("replan_max_retries", CONFIG.replan_max_retries)
-        self.step_timeout = self.config.get("step_timeout", CONFIG.step_timeout)
+        self.auto_approve_confidence = float(cfg.get("auto_approve_confidence", CONFIG.auto_approve_confidence))
+        self.replan_max_retries = int(cfg.get("replan_max_retries", CONFIG.replan_max_retries))
+        self.step_timeout = float(cfg.get("step_timeout", CONFIG.step_timeout))
         self.store = store or WorkflowStore(CONFIG.workflow_db_path)
-        self.planner = planner  # Optional WorkflowPlanner for auto-replan
+        self.planner = planner
         self._lock = threading.RLock()
 
-        # Warm cache from disk so an in-flight workflow survives a restart.
-        self.active_workflows: Dict[str, Dict] = self.store.load_all()
+        # Only warm-cache non-terminal workflows; SQLite remains the source of truth.
+        persisted = self.store.load_all()
+        self.active_workflows: Dict[str, Dict[str, Any]] = {
+            wid: state for wid, state in persisted.items()
+            if state.get("status") not in TERMINAL_STATUSES
+        }
         if self.active_workflows:
-            logger.info("Resumed %d workflow(s) from persistent store.", len(self.active_workflows))
-
-    def _persist(self, workflow_id: str):
-        self.store.save(workflow_id, self.active_workflows[workflow_id])
+            logger.info("Resumed %d active workflow(s) from persistent store.", len(self.active_workflows))
 
     def _now_iso(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def start_workflow(self, workflow_id: str, plan: Dict, profile_id: str) -> Dict[str, Any]:
-        with self._lock:
-    # Idempotency: a retried cron tick calling start_workflow twice with
-            # the same workflow_id should resume the run, not reset it.
-            existing = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-            if existing and existing.get("status") not in TERMINAL_STATUSES:
-                logger.info("start_workflow(%s) called again while still active — resuming, not resetting.", workflow_id)
-                self.active_workflows[workflow_id] = existing
-                return self.get_next_step(workflow_id)
+    def _get_state(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        state = self.active_workflows.get(workflow_id)
+        if state is None:
+            state = self.store.load(workflow_id)
+            if state is not None:
+                self.active_workflows[workflow_id] = state
+        return state
 
+    def _persist(self, workflow_id: str) -> None:
+        self.store.save(workflow_id, self.active_workflows[workflow_id])
+
+    def _status_response(self, workflow_id: str) -> Dict[str, Any]:
+        state = self._get_state(workflow_id)
+        if state is None:
+            return {"error": "Workflow not found"}
+        return {
+            "workflow_id": workflow_id,
+            "status": state.get("status"),
+            "total_steps": len(state.get("plan", {}).get("steps", [])),
+            "completed": len(set(state.get("completed_steps", []))),
+            "failed": len(set(state.get("failed_steps", []))),
+            "replan_count": state.get("replan_count", 0),
+            "history": state.get("history", []),
+        }
+
+    def start_workflow(self, workflow_id: str, plan: Dict[str, Any], profile_id: str) -> Dict[str, Any]:
+        if not workflow_id:
+            return {"error": "workflow_id is required", "status": "failed"}
+        with self._lock:
+            existing = self._get_state(workflow_id)
+            if existing and existing.get("status") not in TERMINAL_STATUSES:
+                return self.get_next_step(workflow_id)
             error = validate_plan(plan)
             if error:
                 return {"error": f"Invalid plan: {error}", "status": "failed"}
-
             self.active_workflows[workflow_id] = {
                 "plan": plan,
                 "profile_id": profile_id,
                 "started_at": self._now_iso(),
                 "next_index": 0,
                 "approved_index": None,
+                "approved_step_ids": [],
                 "completed_steps": [],
                 "failed_steps": [],
                 "status": "running",
                 "history": [],
-                # --- new fields for JARVIS features ---
+                "archived_history": [],
                 "replan_count": 0,
                 "replan_history": [],
                 "step_started_at": None,
@@ -112,706 +136,482 @@ class AutonomousExecutor:
             self._persist(workflow_id)
             return self.get_next_step(workflow_id)
 
-        def get_next_step(self, workflow_id: str) -> Dict[str, Any]:
-            """Return the step Hermes should execute next, or a terminal/paused status."""
-            with self._lock:
-    state = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-                if state is None:
-                    return {"error": "Workflow not found"}
-                self.active_workflows[workflow_id] = state
+    def _pending_indices(self, state: Dict[str, Any]) -> List[int]:
+        steps = state["plan"]["steps"]
+        completed = {str(x) for x in state.get("completed_steps", [])}
+        cancelled = {
+            str(h.get("step_id")) for h in state.get("history", [])
+            if h.get("status") == "cancelled_by_race_winner"
+        }
+        return [i for i, step in enumerate(steps)
+                if str(step.get("id")) not in completed and str(step.get("id")) not in cancelled]
 
-                steps = state["plan"]["steps"]
-                idx = state["next_index"]
+    def _find_next_index(self, state: Dict[str, Any], start: int = 0) -> int:
+        steps = state["plan"]["steps"]
+        completed = {str(x) for x in state.get("completed_steps", [])}
+        cancelled = {
+            str(h.get("step_id")) for h in state.get("history", [])
+            if h.get("status") == "cancelled_by_race_winner"
+        }
+        for i in range(max(0, start), len(steps)):
+            sid = str(steps[i].get("id"))
+            if sid not in completed and sid not in cancelled:
+                return i
+        return len(steps)
 
-                # Auto-skip any step whose dedupe_key has already succeeded in a
-                # prior (possibly crashed) run — never re-hand a completed publish
-                # action back to Hermes.
-                while idx < len(steps):
-                    step = steps[idx]
-                    dedupe_key = step.get("dedupe_key")
-                    if dedupe_key and self.store.is_dedupe_done(dedupe_key):
-                        state["history"].append({
-                            "step_id": step.get("id"),
-                            "action": step.get("action"),
-                            "status": "skipped_duplicate",
-                            "output": f"dedupe_key '{dedupe_key}' already completed in a prior run",
-                            "error": None,
-                            "reported_at": self._now_iso(),
-                        })
-                        state["completed_steps"].append(step.get("id"))
-                        idx += 1
-                        state["next_index"] = idx
-                        state["approved_index"] = None
-                        continue
-                    break
+    def _race_members(self, state: Dict[str, Any], idx: int) -> List[Dict[str, Any]]:
+        steps = state["plan"]["steps"]
+        group = steps[idx].get("race_group_id")
+        if not group:
+            return [steps[idx]]
+        members: List[Dict[str, Any]] = []
+        completed = {str(x) for x in state.get("completed_steps", [])}
+        cancelled = {
+            str(h.get("step_id")) for h in state.get("history", [])
+            if h.get("status") == "cancelled_by_race_winner"
+        }
+        for s in steps[idx:]:
+            if s.get("race_group_id") != group:
+                break
+            sid = str(s.get("id"))
+            if sid not in completed and sid not in cancelled:
+                members.append(s)
+        return members
 
-                if idx >= len(steps):
-                    state["status"] = "completed" if not state["failed_steps"] else "completed_with_failures"
-                    state["step_started_at"] = None
-                    self._persist(workflow_id)
-                    return self._status_response(workflow_id)
+    def get_next_step(self, workflow_id: str) -> Dict[str, Any]:
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            state["next_index"] = self._find_next_index(state, state.get("next_index", 0))
+            idx = state["next_index"]
+            steps = state["plan"]["steps"]
 
-                # Normal execution — grab next step
-                current_step = steps[idx]
+            # Dedupe and completion are checked together so manual/automatic replans
+            # can never restart a previously completed step from index 0.
+            while idx < len(steps):
+                step = steps[idx]
+                sid = step.get("id")
+                if sid in state.get("completed_steps", []):
+                    idx += 1
+                    state["next_index"] = idx
+                    continue
+                key = step.get("dedupe_key")
+                if key and self.store.is_dedupe_done(key):
+                    state.setdefault("history", []).append({
+                        "step_id": sid,
+                        "action": step.get("action"),
+                        "tool": step.get("tool"),
+                        "status": "skipped_duplicate",
+                        "output": f"dedupe_key '{key}' already completed",
+                        "error": None,
+                        "reported_at": self._now_iso(),
+                    })
+                    if sid not in state["completed_steps"]:
+                        state["completed_steps"].append(sid)
+                    idx += 1
+                    state["next_index"] = idx
+                    continue
+                break
 
-                # Parallel Racing: Check if this step is part of a race group
-                race_group = current_step.get("race_group_id")
-                if race_group:
-                    # Find all pending steps in this race group
-                    race_steps = []
-                    for i in range(idx, len(steps)):
-                        s = steps[i]
-                        if s.get("race_group_id") == race_group:
-                            # Check if it was already cancelled or succeeded
-                            hist = [h for h in state["history"] if h["step_id"] == s.get("id")]
-                            if not hist:
-                                race_steps.append(s)
-                        else:
-                            # Race groups must be contiguous
-                            break
-                    
-                    if race_steps:
-                        needs_approval = any(self._requires_approval(s) for s in race_steps)
-                        if needs_approval and state["approved_index"] != idx:
-                            state["status"] = "awaiting_approval"
-                            self._persist(workflow_id)
-                            return {
-                                "workflow_id": workflow_id,
-                                "status": "awaiting_approval",
-                                "race_group_id": race_group,
-                                "parallel_steps": race_steps,
-                                "message": "One or more parallel steps require approval.",
-                                "requires_approval": True,
-                            }
-
-                        if state["status"] == "running":
-                            state["step_started_at"] = self._now_iso()
-                            self._persist(workflow_id)
-                        
-                        return {
-                            "workflow_id": workflow_id,
-                            "status": "ready_to_execute" if state["status"] == "running" else state["status"],
-                            "race_group_id": race_group,
-                            "parallel_steps": race_steps,
-                            "message": "Execute these steps simultaneously. The first successful result will automatically cancel the others.",
-                            "requires_approval": False,
-                        }
-
-                # Normal sequential return
-                if state["status"] == "running":
-                    state["step_started_at"] = self._now_iso()
-                    self._persist(workflow_id)
-
-                needs_approval = self._requires_approval(current_step)
-                if needs_approval and state["approved_index"] != idx:
-                    state["status"] = "awaiting_approval"
-                    self._persist(workflow_id)
-                    return {
-                        "workflow_id": workflow_id,
-                        "status": "awaiting_approval",
-                        "step": current_step,
-                        "approval_reason": self._get_approval_reason(current_step),
-                    }
-
-                state["status"] = "ready_to_execute"
+            if idx >= len(steps):
+                state["status"] = "completed" if not state.get("failed_steps") else "completed_with_failures"
+                state["step_started_at"] = None
                 self._persist(workflow_id)
+                return self._status_response(workflow_id)
+
+            current = steps[idx]
+            members = self._race_members(state, idx)
+            needs_approval = any(self._requires_approval(s) for s in members)
+            approved_ids = {str(x) for x in state.get("approved_step_ids", [])}
+            if needs_approval and not all(str(s.get("id")) in approved_ids for s in members):
+                state["status"] = "awaiting_approval"
+                state["step_started_at"] = state.get("step_started_at") or self._now_iso()
+                self._persist(workflow_id)
+                payload: Dict[str, Any] = {
+                    "workflow_id": workflow_id,
+                    "status": "awaiting_approval",
+                    "requires_approval": True,
+                    "approval_reason": "; ".join(sorted({self._get_approval_reason(s) for s in members if self._requires_approval(s)})),
+                }
+                if current.get("race_group_id"):
+                    payload.update({"race_group_id": current.get("race_group_id"), "parallel_steps": members})
+                else:
+                    payload["step"] = current
+                return payload
+
+            state["status"] = "ready_to_execute"
+            state["step_started_at"] = state.get("step_started_at") or self._now_iso()
+            self._persist(workflow_id)
+            if current.get("race_group_id"):
                 return {
                     "workflow_id": workflow_id,
                     "status": "ready_to_execute",
-                    "step": current_step,
+                    "race_group_id": current.get("race_group_id"),
+                    "parallel_steps": members,
+                    "message": "Execute the listed steps in parallel. Jarvis records a logical winner; Hermes must cancel/ignore loser executions where possible.",
+                    "requires_approval": False,
                 }
+            return {"workflow_id": workflow_id, "status": "ready_to_execute", "step": current}
 
-            def approve_step(self, workflow_id: str, step_id: int) -> Dict[str, Any]:
-                with self._lock:
-    state = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-                    if state is None:
-                        return {"error": "Workflow not found"}
-                    self.active_workflows[workflow_id] = state
+    def approve_step(self, workflow_id: str, step_id: Any) -> Dict[str, Any]:
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            idx = self._find_next_index(state, state.get("next_index", 0))
+            if idx >= len(state["plan"]["steps"]):
+                return {"error": "No pending steps to approve"}
+            members = self._race_members(state, idx)
+            valid = {str(s.get("id")) for s in members}
+            if str(step_id) not in valid:
+                return {"error": f"Step {step_id} is not currently pending"}
+            state.setdefault("approved_step_ids", []).append(step_id)
+            state["approved_step_ids"] = list(dict.fromkeys(state["approved_step_ids"]))
+            state["approved_index"] = idx
+            self._persist(workflow_id)
+            return self.get_next_step(workflow_id)
 
-                    steps = state["plan"]["steps"]
-                    idx = state["next_index"]
+    def report_step_result(self, workflow_id: str, step_id: Any, status: str,
+                           output: Optional[str] = None, error: Optional[str] = None) -> Dict[str, Any]:
+        if status not in VALID_RESULT_STATUSES:
+            return {"error": f"Unsupported status '{status}'"}
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            steps = state["plan"]["steps"]
 
-                    if idx >= len(steps):
-                        return {"error": "No pending steps to approve"}
-                        
-                    current_step = steps[idx]
-                    valid_ids = [current_step.get("id")]
-                    
-                    race_group = current_step.get("race_group_id")
-                    if race_group:
-                        for s in steps[idx+1:]:
-                            if s.get("race_group_id") == race_group:
-                                valid_ids.append(s.get("id"))
-                            else:
-                                break
-                                
-                    if step_id not in valid_ids:
-                        return {"error": f"Step {step_id} is not the currently pending step"}
-
-                    state["approved_index"] = idx
-                    self._persist(workflow_id)
+            # Idempotency: if the same execution report arrives again, return the
+            # current state instead of appending duplicate history or advancing twice.
+            for record in reversed(state.get("history", [])):
+                if record.get("step_id") == step_id and record.get("status") == status:
                     return self.get_next_step(workflow_id)
+                if record.get("step_id") == step_id and record.get("status") == "cancelled_by_race_winner":
+                    return {"workflow_id": workflow_id, "status": "ignored_loser_result", "step_id": step_id}
 
-                def report_step_result(
-                    self,
-                    workflow_id: str,
-                    step_id: int,
-                    status: str,
-                    output: Optional[str] = None,
-                    error: Optional[str] = None,
-                ) -> Dict[str, Any]:
-                    state = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-                    if state is None:
-                        return {"error": "Workflow not found"}
-                    self.active_workflows[workflow_id] = state
+            idx = self._find_next_index(state, state.get("next_index", 0))
+            if idx >= len(steps):
+                return self._status_response(workflow_id)
+            current = steps[idx]
+            group = current.get("race_group_id")
+            valid_step: Optional[Dict[str, Any]] = None
+            if group:
+                for s in self._race_members(state, idx):
+                    if str(s.get("id")) == str(step_id):
+                        valid_step = s
+                        break
+            elif str(current.get("id")) == str(step_id):
+                valid_step = current
+            if valid_step is None:
+                return {"error": f"Step {step_id} is not currently expected"}
 
-                    steps = state["plan"]["steps"]
-                    idx = state["next_index"]
+            record = {
+                "step_id": valid_step.get("id"),
+                "action": valid_step.get("action"),
+                "tool": valid_step.get("tool"),
+                "status": status,
+                "output": output,
+                "error": error,
+                "reported_at": self._now_iso(),
+            }
+            state.setdefault("history", []).append(record)
 
-                    if idx >= len(steps):
-                        return {"error": "Workflow is already completed"}
+            if status == "success":
+                sid = valid_step.get("id")
+                if sid not in state["completed_steps"]:
+                    state["completed_steps"].append(sid)
+                if valid_step.get("dedupe_key"):
+                    self.store.mark_dedupe_done(valid_step["dedupe_key"], workflow_id, sid)
+                repair_match = re.search(r"TOOL REPAIR:.*?['\"]([^'\"]+)['\"]", valid_step.get("action", ""), re.I)
+                if repair_match:
+                    self.store.mark_tool_fixed(repair_match.group(1))
 
-                    current_step = steps[idx]
-                    race_group = current_step.get("race_group_id")
-                    
-                    valid_step = None
-                    if race_group:
-                        # Check if step_id matches any pending step in the race group
-                        for s in steps[idx:]:
-                            if s.get("race_group_id") == race_group:
-                                if s.get("id") == step_id:
-                                    valid_step = s
-                                    break
-                            else:
-                                break
-                    else:
-                        if current_step.get("id") == step_id:
-                            valid_step = current_step
-                            
-                    if not valid_step:
-                        return {"error": f"Step {step_id} is not the currently expected step (or valid race step)"}
-
-                    record = {
-                        "step_id": step_id,
-                        "action": valid_step.get("action"),
-                        "tool": valid_step.get("tool"),
-                        "status": status,
-                        "output": output,
-                        "error": error,
-                        "reported_at": self._now_iso(),
-                    }
-                    state["history"].append(record)
-
-                    if status == "success":
-                        state["completed_steps"].append(step_id)
-                        if valid_step.get("dedupe_key"):
-                            self.store.mark_dedupe_done(valid_step["dedupe_key"], workflow_id, step_id)
-                        
-                        import re
-                        repair_match = re.search(r"TOOL REPAIR: Diagnose and fix broken tool '([^']+)'", valid_step.get("action", ""))
-                        if repair_match and self.store:
-                            self.store.mark_tool_fixed(repair_match.group(1))
-                        
-                        if race_group:
-                            # Cancel all other steps in the race group
-                            group_step_count = 0
-                            for s in steps[idx:]:
-                                if s.get("race_group_id") == race_group:
-                                    group_step_count += 1
-                                    loser_id = s.get("id")
-                                    if loser_id != step_id:
-                                        state["history"].append({
-                                            "step_id": loser_id,
-                                            "action": s.get("action"),
-                                            "status": "cancelled_by_race_winner",
-                                            "output": f"Cancelled because step {step_id} won the race.",
-                                            "reported_at": self._now_iso()
-                                        })
-                                        # Clean up from failed_steps if a previous loser was recorded (Bug E)
-                                        if loser_id in state["failed_steps"]:
-                                            state["failed_steps"].remove(loser_id)
-                                else:
-                                    break
-                            # Advance index past the entire group
-                            state["next_index"] += group_step_count
-                        else:
-                            state["next_index"] += 1
-                            
-                    elif status == "failed":
-                        state["failed_steps"].append(step_id)
-                        
-                        if race_group:
-                            # Check if all steps in the race group have failed
-                            group_size = 0
-                            failures = 0
-                            for s in steps[idx:]:
-                                if s.get("race_group_id") == race_group:
-                                    group_size += 1
-                                    if s.get("id") in state["failed_steps"]:
-                                        failures += 1
-                                else:
-                                    break
-                            
-                            if failures == group_size:
-                                # Entire race group failed. Trigger replan for the whole group.
-                                state["next_index"] += group_size
-                                # Proceed to trigger replan below
-                            else:
-                                # Just record failure and wait for other racers
-                                self._persist(workflow_id)
-                                return self._status_response(workflow_id)
-                        else:
-                            state["next_index"] += 1
-
-                    state["approved_index"] = None
-                    state["step_started_at"] = None
-                    self._persist(workflow_id)
-
-                    if self.memory_engine:
-                        self.memory_engine.add_memory(
-                            state["profile_id"],
-                            f"Workflow {workflow_id} step {step_id} ({valid_step.get('action')}): {status}"
-                            + (f" — {error}" if error else ""),
-                            {"type": "execution_log" if status == "success" else "error_log", "workflow_id": workflow_id},
-                        )
-
-                    # --- Auto-replan on failure ---
-                    if status != "success":
-                        if self.planner and state.get("replan_count", 0) < self.replan_max_retries:
-                            return self._auto_replan(workflow_id, valid_step, error or "Unknown error")
-                        else:
-                            # Replan exhausted or unavailable — abort workflow
-                            state["status"] = "completed_with_failures" if state["completed_steps"] else "failed"
-                            self._persist(workflow_id)
-                            return self.get_next_step(workflow_id)
-
-                    return self.get_next_step(workflow_id)
-
-                def _auto_replan(self, workflow_id: str, failed_step: Dict, error: str) -> Dict[str, Any]:
-                    """Automatically replan when a step fails, if planner is available and cap not reached."""
-                    with self._lock:
-    state = self.active_workflows[workflow_id]
-                        state["replan_count"] = state.get("replan_count", 0) + 1
-
-                        logger.info(
-                            "Auto-replanning workflow %s (attempt %d/%d) after step %s failed: %s",
-                            workflow_id, state["replan_count"], self.replan_max_retries,
-                            failed_step.get("id"), error[:100],
-                        )
-
-                        new_plan = self.planner.replan(
-                            original_plan=state["plan"],
-                            failed_step=failed_step.get("id"),
-                            error=error,
-                            history=state["history"],
-                        )
-
-                        plan_error = validate_plan(new_plan)
-                        if plan_error:
-                            logger.error("Replan produced invalid plan: %s — continuing with original", plan_error)
-                            state["replan_history"].append({
-                                "attempt": state["replan_count"],
-                                "failed_step_id": failed_step.get("id"),
-                                "error": error,
-                                "result": "invalid_plan",
-                                "at": self._now_iso(),
-                            })
-                            self._persist(workflow_id)
-                            return self.get_next_step(workflow_id)
-
-                        # Record replan event
-                        state["replan_history"].append({
-                            "attempt": state["replan_count"],
-                            "failed_step_id": failed_step.get("id"),
-                            "error": error,
-                            "result": "replanned",
-                            "new_steps_count": len(new_plan.get("steps", [])),
-                            "replan_reason": new_plan.get("replan_reason", ""),
-                            "at": self._now_iso(),
-                        })
-
-                        state["plan"] = new_plan
-                        
-                        # Calculate next_index based on first incomplete step
-                        next_idx = 0
-                        for i, s in enumerate(new_plan.get("steps", [])):
-                            if s.get("id") not in state.get("completed_steps", []):
-                                next_idx = i
-                                break
-                                
-                        state["next_index"] = next_idx
-                        state["approved_index"] = None
-                        state["status"] = "running"
-                        # We retain completed_steps to prevent amnesia (Defect 1)
-                        state["failed_steps"] = []
-                        state["archived_history"] = state.get("archived_history", []) + state.get("history", [])
-                        state["history"] = []
-                        self._persist(workflow_id)
-
-                        logger.info("Replan successful — new plan has %d steps", len(new_plan["steps"]))
-
-                        if self.memory_engine:
-                            self.memory_engine.add_memory(
-                                state["profile_id"],
-                                f"Workflow {workflow_id} auto-replanned (attempt {state['replan_count']}): "
-                                f"step {failed_step.get('id')} failed with '{error[:100]}'. "
-                                f"New plan has {len(new_plan['steps'])} steps.",
-                                {"type": "replan_event", "workflow_id": workflow_id},
-                            )
-
-                        return self.get_next_step(workflow_id)
-
-                    # --- Workflow cancellation ---
-
-                    def cancel_workflow(self, workflow_id: str, reason: str = "") -> Dict[str, Any]:
-                        """Cancel an active workflow. Terminal workflows cannot be cancelled."""
-                        with self._lock:
-    state = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-                            if state is None:
-                                return {"error": "Workflow not found"}
-
-                            if state.get("status") in TERMINAL_STATUSES:
-                                return {"error": f"Workflow already in terminal state: {state['status']}"}
-
-                            state["status"] = "cancelled"
-                            state["step_started_at"] = None
-                            state["history"].append({
-                                "step_id": None,
-                                "action": "workflow_cancelled",
-                                "status": "cancelled",
-                                "output": reason or "Cancelled by user/system",
+                if group:
+                    for loser in self._race_members(state, idx):
+                        loser_id = loser.get("id")
+                        if str(loser_id) != str(step_id):
+                            state.setdefault("history", []).append({
+                                "step_id": loser_id,
+                                "action": loser.get("action"),
+                                "tool": loser.get("tool"),
+                                "status": "cancelled_by_race_winner",
+                                "output": f"Logical cancellation because step {step_id} won the race.",
                                 "error": None,
                                 "reported_at": self._now_iso(),
                             })
-                            self.active_workflows[workflow_id] = state
-                            self._persist(workflow_id)
+                    state["next_index"] = self._find_next_index(state, idx + 1)
+                else:
+                    state["next_index"] = self._find_next_index(state, idx + 1)
+            else:
+                sid = valid_step.get("id")
+                if sid not in state["failed_steps"]:
+                    state["failed_steps"].append(sid)
+                if group:
+                    remaining = self._race_members(state, idx)
+                    # Wait for all racers to report before deciding the group failed.
+                    unresolved = [s for s in remaining if not any(
+                        h.get("step_id") == s.get("id") and h.get("status") in VALID_RESULT_STATUSES
+                        for h in state.get("history", [])
+                    )]
+                    if unresolved:
+                        self._persist(workflow_id)
+                        return self._status_response(workflow_id)
+                    state["next_index"] = self._find_next_index(state, idx + 1)
+                else:
+                    state["next_index"] = self._find_next_index(state, idx + 1)
 
-                            logger.info("Workflow %s cancelled: %s", workflow_id, reason or "no reason given")
+            state["approved_step_ids"] = []
+            state["approved_index"] = None
+            state["step_started_at"] = None
+            self._persist(workflow_id)
 
-                            if self.memory_engine:
-                                self.memory_engine.add_memory(
-                                    state["profile_id"],
-                                    f"Workflow {workflow_id} ({state['plan'].get('goal', '')}) was cancelled: {reason}",
-                                    {"type": "workflow_cancelled", "workflow_id": workflow_id},
-                                )
+            if self.memory_engine:
+                try:
+                    self.memory_engine.add_memory(
+                        state["profile_id"],
+                        f"Workflow {workflow_id} step {step_id} ({valid_step.get('action')}): {status}" + (f" — {error}" if error else ""),
+                        {"type": "execution_log" if status == "success" else "error_log", "workflow_id": workflow_id},
+                    )
+                except Exception:
+                    logger.debug("Memory logging failed for workflow %s", workflow_id, exc_info=True)
 
-                            return {
-                                "workflow_id": workflow_id,
-                                "status": "cancelled",
-                                "reason": reason or "Cancelled by user/system",
-                                "completed_steps": len(state["completed_steps"]),
-                                "total_steps": len(state["plan"]["steps"]),
-                            }
+            if status == "failed" and self.planner and state.get("replan_count", 0) < self.replan_max_retries:
+                return self._auto_replan(workflow_id, valid_step, error or "Unknown error")
+            if status == "failed" and not self.planner:
+                state["status"] = "completed_with_failures" if state.get("completed_steps") else "failed"
+                self._persist(workflow_id)
+            return self.get_next_step(workflow_id)
 
-                        # --- Stall detection ---
+    def _auto_replan(self, workflow_id: str, failed_step: Dict[str, Any], error: str) -> Dict[str, Any]:
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            state["replan_count"] = state.get("replan_count", 0) + 1
+            try:
+                new_plan = self.planner.replan(
+                    original_plan=state["plan"],
+                    failed_step=failed_step.get("id"),
+                    error=error,
+                    history=state.get("history", []),
+                )
+            except Exception as exc:
+                logger.exception("Auto-replan failed")
+                state.setdefault("replan_history", []).append({
+                    "attempt": state["replan_count"],
+                    "failed_step_id": failed_step.get("id"),
+                    "error": error,
+                    "result": "planner_exception",
+                    "detail": str(exc),
+                    "at": self._now_iso(),
+                })
+                state["status"] = "completed_with_failures" if state.get("completed_steps") else "failed"
+                self._persist(workflow_id)
+                return self._status_response(workflow_id)
 
-                        def check_stalled_workflows(self, timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
-                            """Find workflows where the current step started more than timeout_seconds ago
-                            without a result being reported. Returns a list of stalled workflow summaries."""
-                            timeout = timeout_seconds or self.step_timeout
-                            stalled = []
-                            now = datetime.now(timezone.utc)
+            plan_error = validate_plan(new_plan)
+            if plan_error:
+                state.setdefault("replan_history", []).append({
+                    "attempt": state["replan_count"],
+                    "failed_step_id": failed_step.get("id"),
+                    "error": error,
+                    "result": "invalid_plan",
+                    "detail": plan_error,
+                    "at": self._now_iso(),
+                })
+                self._persist(workflow_id)
+                return self._status_response(workflow_id)
 
-                            # Check both in-memory cache and store
-                            with self._lock:
-                                all_workflows = dict(self.active_workflows)
-                            if self.store:
-                                all_workflows.update(self.store.load_all())
-                            for wf_id, state in all_workflows.items():
-                                if state.get("status") not in ("running",):
-                                    continue
-                                started = state.get("step_started_at")
-                                if not started:
-                                    continue
-                                try:
-                                    started_dt = datetime.fromisoformat(started)
-                                    # Handle naive datetimes
-                                    if started_dt.tzinfo is None:
-                                        started_dt = started_dt.replace(tzinfo=timezone.utc)
-                                    elapsed = (now - started_dt).total_seconds()
-                                except (ValueError, TypeError):
-                                    continue
+            old_history = state.get("history", [])
+            state["archived_history"] = state.get("archived_history", []) + old_history
+            state["history"] = []
+            state["plan"] = new_plan
+            state["failed_steps"] = []
+            state["approved_step_ids"] = []
+            state["approved_index"] = None
+            state["status"] = "running"
+            # Crucial: never default to 0. Start at the first new, incomplete step.
+            state["next_index"] = self._find_next_index(state, 0)
+            state.setdefault("replan_history", []).append({
+                "attempt": state["replan_count"],
+                "failed_step_id": failed_step.get("id"),
+                "error": error,
+                "result": "replanned",
+                "new_steps_count": len(new_plan["steps"]),
+                "replan_reason": new_plan.get("replan_reason", ""),
+                "at": self._now_iso(),
+            })
+            self._persist(workflow_id)
+            return self.get_next_step(workflow_id)
 
-                                if elapsed > timeout:
-                                    steps = state["plan"]["steps"]
-                                    idx = state.get("next_index", 0)
-                                    current_step = steps[idx] if idx < len(steps) else None
-                                    stalled.append({
-                                        "workflow_id": wf_id,
-                                        "profile_id": state.get("profile_id"),
-                                        "goal": state["plan"].get("goal", ""),
-                                        "stalled_step": current_step,
-                                        "elapsed_seconds": round(elapsed, 1),
-                                        "step_started_at": started,
-                                    })
+    def cancel_workflow(self, workflow_id: str, reason: str = "") -> Dict[str, Any]:
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            if state.get("status") in TERMINAL_STATUSES:
+                return {"error": f"Workflow already in terminal state: {state['status']}"}
+            state["status"] = "cancelled"
+            state["step_started_at"] = None
+            state.setdefault("history", []).append({
+                "step_id": None,
+                "action": "workflow_cancelled",
+                "tool": None,
+                "status": "cancelled",
+                "output": reason or "Cancelled by user/system",
+                "error": None,
+                "reported_at": self._now_iso(),
+            })
+            self._persist(workflow_id)
+            return {
+                "workflow_id": workflow_id,
+                "status": "cancelled",
+                "reason": reason or "Cancelled by user/system",
+                "completed_steps": len(set(state.get("completed_steps", []))),
+                "total_steps": len(state.get("plan", {}).get("steps", [])),
+            }
 
-                            if stalled:
-                                logger.warning("Found %d stalled workflow(s)", len(stalled))
-                            return stalled
+    def check_stalled_workflows(self, timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
+        timeout = self.step_timeout if timeout_seconds is None else float(timeout_seconds)
+        now = datetime.now(timezone.utc)
+        stalled: List[Dict[str, Any]] = []
+        with self._lock:
+            workflows = dict(self.active_workflows)
+        for wf_id, state in workflows.items():
+            if state.get("status") not in {"running", "ready_to_execute"}:
+                continue
+            started = state.get("step_started_at")
+            if not started:
+                continue
+            try:
+                started_dt = datetime.fromisoformat(started)
+                if started_dt.tzinfo is None:
+                    started_dt = started_dt.replace(tzinfo=timezone.utc)
+                elapsed = (now - started_dt).total_seconds()
+            except (ValueError, TypeError):
+                continue
+            if elapsed > timeout:
+                idx = self._find_next_index(state, state.get("next_index", 0))
+                step = state.get("plan", {}).get("steps", [])[idx] if idx < len(state.get("plan", {}).get("steps", [])) else None
+                stalled.append({
+                    "workflow_id": wf_id,
+                    "profile_id": state.get("profile_id"),
+                    "goal": state.get("plan", {}).get("goal", ""),
+                    "stalled_step": step,
+                    "elapsed_seconds": round(elapsed, 1),
+                    "step_started_at": started,
+                })
+        return stalled
 
-                        # --- Status helpers ---
+    def get_workflow_status(self, workflow_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            return self._get_state(workflow_id)
 
-                        def _status_response(self, workflow_id: str) -> Dict[str, Any]:
-                            with self._lock:
-    state = self.active_workflows[workflow_id]
-                                total = len(state["plan"]["steps"])
-                                return {
-                                    "workflow_id": workflow_id,
-                                    "status": state["status"],
-                                    "total_steps": total,
-                                    "completed": len(state["completed_steps"]),
-                                    "failed": len(state["failed_steps"]),
-                                    "replan_count": state.get("replan_count", 0),
-                                    "history": state["history"],
-                                }
+    def list_pending_approvals(self) -> List[Dict[str, Any]]:
+        return self.store.list_by_status("awaiting_approval")
 
-                            def _requires_approval(self, step: Dict) -> bool:
-                                if "requires_approval" in step:
-                                    if not step["requires_approval"]:
-                                        return False
-                                    return True
-                                    
-                                if step.get("risk") == "high":
-                                    return True
-                                if step.get("confidence", 0) < self.auto_approve_confidence:
-                                    return True
-                                return False
+    def _requires_approval(self, step: Dict[str, Any]) -> bool:
+        if "requires_approval" in step:
+            return bool(step["requires_approval"])
+        if str(step.get("risk", "")).lower() == "high":
+            return True
+        try:
+            return float(step.get("confidence", 0.0)) < self.auto_approve_confidence
+        except (TypeError, ValueError):
+            return True
 
-                            def _get_approval_reason(self, step: Dict) -> str:
-                                reasons = []
-                                if step.get("risk") == "high":
-                                    reasons.append("High risk operation")
-                                if step.get("confidence", 0) < self.auto_approve_confidence:
-                                    reasons.append(f"Low confidence ({step.get('confidence', 0):.0%})")
-                                if step.get("requires_approval", False):
-                                    reasons.append("Explicitly marked for approval")
-                                return "; ".join(reasons) if reasons else "Unknown"
+    def _get_approval_reason(self, step: Dict[str, Any]) -> str:
+        reasons: List[str] = []
+        if str(step.get("risk", "")).lower() == "high":
+            reasons.append("High risk operation")
+        try:
+            if float(step.get("confidence", 0.0)) < self.auto_approve_confidence:
+                reasons.append(f"Low confidence ({float(step.get('confidence', 0.0)):.0%})")
+        except (TypeError, ValueError):
+            reasons.append("Invalid confidence")
+        if step.get("requires_approval"):
+            reasons.append("Explicitly marked for approval")
+        return "; ".join(reasons) or "Approval required"
 
-                            def get_workflow_status(self, workflow_id: str) -> Optional[Dict]:
-                                with self._lock:
-    return self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
+    def reflect(self, workflow_id: str) -> Dict[str, Any]:
+        with self._lock:
+            state = self._get_state(workflow_id)
+            if state is None:
+                return {"error": "Workflow not found"}
+            history = state.get("archived_history", []) + state.get("history", [])
+            successes = [h for h in history if h.get("status") == "success"]
+            failures = [h for h in history if h.get("status") == "failed"]
+            successful_tools = sorted({h.get("tool") for h in successes if h.get("tool")})
+            failed_tools = sorted({h.get("tool") for h in failures if h.get("tool")})
+            attempts = len(successes) + len(failures)
+            success_rate = len(successes) / max(1, attempts)
+            goal = state.get("plan", {}).get("goal", "")
+            lesson = (
+                f"WORKFLOW REFLECTION: Goal '{goal}' finished with status {state.get('status')}. "
+                f"Success rate: {success_rate:.0%}. "
+                f"Worked tools: {', '.join(successful_tools) or 'none'}. "
+                f"Failed tools: {', '.join(failed_tools) or 'none'}. "
+                f"Replans: {state.get('replan_count', 0)}."
+            )
+            captured = None
+            if self.memory_engine:
+                try:
+                    captured = self.memory_engine.add_memory(
+                        state["profile_id"], lesson,
+                        {"type": "workflow_reflection", "workflow_id": workflow_id,
+                         "success_rate": round(success_rate, 2), "replan_count": state.get("replan_count", 0)},
+                    )
+                except Exception:
+                    logger.debug("Reflection memory write failed", exc_info=True)
+            return {
+                "workflow_id": workflow_id,
+                "lesson": lesson,
+                "patterns": {
+                    "success_rate": round(success_rate, 2),
+                    "successful_tools": successful_tools,
+                    "failed_tools": failed_tools,
+                    "replan_count": state.get("replan_count", 0),
+                },
+                "captured": captured,
+            }
 
-                                def list_pending_approvals(self) -> list:
-                                    """For a Hermes cron job to poll, since jarvis-memory (an MCP
-                                    server) has no outbound channel of its own to push a notification
-                                    through — this is the pollable surface that makes the approval
-                                    gate actually visible instead of silently sitting in state."""
-                                    return self.store.list_by_status("awaiting_approval")
-
-                                def reflect(self, workflow_id: str) -> Dict[str, Any]:
-                                    """
-                                    Self-evolution: distill a finished run into a STRUCTURED lesson.
-
-                                    This is the WRITE side of the self-evolution loop. It stores:
-                                    - What the goal was
-                                    - Which tools/approaches succeeded vs failed
-                                    - Success rate
-                                    - Replan count (how hard this was)
-                                    - Actionable lesson text
-
-                                    The READ side is in WorkflowPlanner._recall_lessons(), which
-                                    searches for these reflections before making a new plan.
-                                    """
-                                    with self._lock:
-    state = self.active_workflows.get(workflow_id) or self.store.load(workflow_id)
-                                        if state is None:
-                                            return {"error": "Workflow not found"}
-
-                                        history = state.get("archived_history", []) + state.get("history", [])
-                                        goal = state["plan"].get("goal", "")
-                                        completed = state["completed_steps"]
-                                        failed = state["failed_steps"]
-                                        replan_count = state.get("replan_count", 0)
-                                        total_steps = len(state["plan"]["steps"]) + (len(state.get("archived_history", [])) // 2) # Rough estimate
-
-                                        # --- Extract structured patterns ---
-                                        successful_actions = []
-                                        failed_actions = []
-                                        successful_tools = set()
-                                        failed_tools = set()
-
-                                        for h in history:
-                                            action = h.get("action", "")
-                                            tool = h.get("tool", "unknown")
-                                            if h["status"] == "success":
-                                                successful_actions.append(action)
-                                                if tool != "unknown":
-                                                    successful_tools.add(tool)
-                                            elif h["status"] not in ("skipped_duplicate", "cancelled", "cancelled_by_race_winner"):
-                                                failed_actions.append(f"{action}: {h.get('error', 'unknown error')}")
-                                                if tool != "unknown":
-                                                    failed_tools.add(tool)
-
-                                        success_rate = len(successful_actions) / max(1, (len(successful_actions) + len(failed_actions)))
-
-                                        # --- Build lesson text (searchable by future recall) ---
-                                        lesson_parts = [
-                                            f"WORKFLOW REFLECTION: Goal '{goal}' finished with status {state['status']}.",
-                                            f"Success rate: {success_rate:.0%} ({len(completed)}/{total_steps} steps).",
-                                        ]
-
-                                        if successful_actions:
-                                            lesson_parts.append(
-                                                f"SUCCEEDED approaches: {'; '.join(successful_actions[:5])}."
-                                            )
-                                        if successful_tools:
-                                            lesson_parts.append(
-                                                f"WORKED tools: {', '.join(sorted(successful_tools))}."
-                                            )
-                                        if failed_actions:
-                                            lesson_parts.append(
-                                                f"FAILED approaches: {'; '.join(failed_actions[:5])}."
-                                            )
-                                        if failed_tools:
-                                            lesson_parts.append(
-                                                f"AVOID tools (failed): {', '.join(sorted(failed_tools))}."
-                                            )
-                                        if replan_count > 0:
-                                            lesson_parts.append(
-                                                f"Required {replan_count} replan(s) — task was harder than expected."
-                                            )
-
-                                        # Add a forward-looking recommendation
-                                        if state["status"] == "completed":
-                                            lesson_parts.append("RECOMMENDATION: This approach works well for similar goals.")
-                                        elif state["status"] == "completed_with_failures":
-                                            lesson_parts.append("RECOMMENDATION: Try alternative approaches for the failed steps next time.")
-                                        else:
-                                            lesson_parts.append("RECOMMENDATION: This approach needs significant changes for similar goals.")
-
-                                        lesson = " ".join(lesson_parts)
-
-                                        # --- Structured metadata for machine parsing ---
-                                        reflection_meta = {
-                                            "type": "workflow_reflection",
-                                            "workflow_id": workflow_id,
-                                            "goal": goal,
-                                            "status": state["status"],
-                                            "success_rate": round(success_rate, 2),
-                                            "successful_tools": sorted(successful_tools),
-                                            "failed_tools": sorted(failed_tools),
-                                            "replan_count": replan_count,
-                                            "total_steps": total_steps,
-                                            "completed_count": len(completed),
-                                            "failed_count": len(failed),
-                                        }
-
-                                        captured = None
-                                        if self.memory_engine:
-                                            captured = self.memory_engine.add_memory(
-                                                state["profile_id"],
-                                                lesson,
-                                                reflection_meta,
-                                            )
-
-                                        return {
-                                            "workflow_id": workflow_id,
-                                            "lesson": lesson,
-                                            "patterns": {
-                                                "success_rate": round(success_rate, 2),
-                                                "successful_tools": sorted(successful_tools),
-                                                "failed_tools": sorted(failed_tools),
-                                                "successful_actions": successful_actions[:5],
-                                                "failed_actions": failed_actions[:5],
-                                                "replan_count": replan_count,
-                                            },
-                                            "captured": captured,
-                                        }
-
-                                    def self_evolve(self, profile_id: str) -> Dict[str, Any]:
-                                        """Cross-workflow self-evolution analysis.
-
-                                        Scans ALL completed workflows for a profile and builds an
-                                        aggregate "what works / what doesn't" summary. This is useful
-                                        for Hermes to call periodically to understand its own strengths
-                                        and weaknesses.
-                                        """
-                                        all_states = self.store.load_all()
-
-                                        profile_workflows = {
-                                            wf_id: state for wf_id, state in all_states.items()
-                                            if state.get("profile_id") == profile_id
-                                            and state.get("status") in ("completed", "completed_with_failures", "failed", "cancelled")
-                                        }
-
-                                        if not profile_workflows:
-                                            return {
-                                                "profile_id": profile_id,
-                                                "total_workflows": 0,
-                                                "message": "No completed workflows found for this profile.",
-                                            }
-
-                                        # Aggregate patterns
-                                        total = len(profile_workflows)
-                                        fully_completed = sum(1 for s in profile_workflows.values() if s["status"] == "completed")
-                                        tool_successes: Dict[str, int] = {}
-                                        tool_failures: Dict[str, int] = {}
-                                        total_replans = 0
-
-                                        for state in profile_workflows.values():
-                                            total_replans += state.get("replan_count", 0)
-                                            for h in state.get("history", []):
-                                                for s in state["plan"]["steps"]:
-                                                    if s.get("id") == h.get("step_id"):
-                                                        tool = s.get("tool", "unknown")
-                                                        if h["status"] == "success":
-                                                            tool_successes[tool] = tool_successes.get(tool, 0) + 1
-                                                        elif h["status"] not in ("skipped_duplicate", "cancelled"):
-                                                            tool_failures[tool] = tool_failures.get(tool, 0) + 1
-
-                                        # Build evolution summary
-                                        unreliable_tools = sorted(
-                                            [t for t, c in tool_failures.items() if c >= 2],
-                                            key=lambda t: tool_failures[t],
-                                            reverse=True,
-                                        )
-
-                                        evolution = {
-                                            "profile_id": profile_id,
-                                            "total_workflows": total,
-                                            "completion_rate": round(fully_completed / total, 2) if total else 0,
-                                            "total_replans": total_replans,
-                                            "reliable_tools": sorted(
-                                                [t for t, c in tool_successes.items() if c >= 2 and t not in tool_failures],
-                                                key=lambda t: tool_successes[t],
-                                                reverse=True,
-                                            ),
-                                            "unreliable_tools": unreliable_tools,
-                                            "tool_success_counts": tool_successes,
-                                            "tool_failure_counts": tool_failures,
-                                        }
-
-                                        # --- Tool Repair: Auto-flag systematically broken tools ---
-                                        if hasattr(self, "store"):
-                                            for tool in unreliable_tools:
-                                                fails = tool_failures.get(tool, 0)
-                                                successes = tool_successes.get(tool, 0)
-                                                # If a tool fails way more than it succeeds (e.g. 3+ fails and < 20% success rate)
-                                                if fails >= 3 and (successes / (successes + fails)) < 0.2:
-                                                    self.store.mark_tool_broken(tool, f"Failed {fails} times. Auto-flagged by self-evolution.")
-
-                                        # Store the evolution summary in memory for future planning
-                                        if self.memory_engine:
-                                            summary_text = (
-                                                f"SELF-EVOLUTION SUMMARY for {profile_id}: "
-                                                f"{fully_completed}/{total} workflows fully completed ({evolution['completion_rate']:.0%}). "
-                                                f"Reliable tools: {', '.join(evolution['reliable_tools']) or 'none identified yet'}. "
-                                                f"Unreliable tools: {', '.join(evolution['unreliable_tools']) or 'none identified yet'}. "
-                                                f"Total replans needed: {total_replans}."
-                                            )
-                                            self.memory_engine.add_memory(
-                                                profile_id,
-                                                summary_text,
-                                                {"type": "self_evolution_summary"},
-                                            )
-
-                                        return evolution
-
-
-
-
-
-
-
-
-
+    def self_evolve(self, profile_id: str) -> Dict[str, Any]:
+        all_states = self.store.load_all()
+        profile = {
+            wid: state for wid, state in all_states.items()
+            if state.get("profile_id") == profile_id and state.get("status") in TERMINAL_STATUSES
+        }
+        if not profile:
+            return {"profile_id": profile_id, "total_workflows": 0,
+                    "message": "No completed workflows found for this profile."}
+        total = len(profile)
+        fully_completed = sum(1 for s in profile.values() if s.get("status") == "completed")
+        tool_successes: Dict[str, int] = {}
+        tool_failures: Dict[str, int] = {}
+        total_replans = sum(s.get("replan_count", 0) for s in profile.values())
+        for state in profile.values():
+            for h in state.get("archived_history", []) + state.get("history", []):
+                tool = h.get("tool") or "unknown"
+                if h.get("status") == "success":
+                    tool_successes[tool] = tool_successes.get(tool, 0) + 1
+                elif h.get("status") == "failed":
+                    tool_failures[tool] = tool_failures.get(tool, 0) + 1
+        unreliable = sorted(tool_failures, key=tool_failures.get, reverse=True)
+        reliable = sorted([t for t, n in tool_successes.items() if n >= 2 and tool_failures.get(t, 0) == 0],
+                          key=tool_successes.get, reverse=True)
+        for tool in unreliable:
+            fails = tool_failures[tool]
+            successes = tool_successes.get(tool, 0)
+            if fails >= 3 and successes / max(1, successes + fails) < 0.2:
+                self.store.mark_tool_broken(tool, f"Failed {fails} times; auto-flagged by self-evolution")
+        return {
+            "profile_id": profile_id,
+            "total_workflows": total,
+            "completion_rate": round(fully_completed / total, 2),
+            "total_replans": total_replans,
+            "reliable_tools": reliable,
+            "unreliable_tools": unreliable,
+            "tool_success_counts": tool_successes,
+            "tool_failure_counts": tool_failures,
+        }
